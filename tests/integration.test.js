@@ -14,7 +14,7 @@ import { projectSchema } from "../domain.js";
 import { prepareQuote, confirmQuote } from "../lib/generation.js";
 import { timelinePlan, timelineXml } from "../lib/export.js";
 import { modelInput, FalProvider } from "../lib/providers.js";
-import { mediaUrl } from "../lib/download.js";
+import { mediaUrl, isPublicAddress } from "../lib/download.js";
 import { XMLValidator, XMLParser } from "fast-xml-parser";
 let dir, db, storage, app, agent, env, audio, video, image;
 const origin = "http://localhost:3000";
@@ -33,7 +33,7 @@ before(async () => {
   env = {
     DATABASE_URL: process.env.TEST_DATABASE_URL,
     NODE_ENV: "test",
-    LOCAL_DATA_DIR: dir,
+    LOCAL_DATA_DIR: path.join(dir, ".local"),
     STORAGE_MODE: "local",
     ADMIN_PASSWORD: randomUUID(),
     APP_ORIGIN: origin,
@@ -359,6 +359,16 @@ test("restart recovery marks interrupted submissions uncertain", async () => {
   );
 });
 test("provider contracts and media URL restrictions", async () => {
+  for (const ip of [
+    "127.0.0.1",
+    "10.0.0.1",
+    "169.254.169.254",
+    "198.18.0.1",
+    "192.0.2.1",
+    "::1",
+  ])
+    assert.equal(isPublicAddress(ip), false);
+  assert.equal(isPublicAddress("8.8.8.8"), true);
   const input = modelInput("kling", {
     prompt: "Orbit",
     duration: 5,

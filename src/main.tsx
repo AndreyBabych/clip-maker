@@ -501,7 +501,10 @@ function App() {
             key={t}
             disabled={!active}
             className={active && tab === t ? "selected" : ""}
-            onClick={() => setTab(t)}
+            onClick={() => {
+              setTab(t);
+              window.scrollTo({ top: 0 });
+            }}
           >
             <span className="navicon">
               {["✧", "◐", "♙", "⌖", "▤", "≋", "▧", "◷", "↗", "⚙"][i]}
@@ -710,7 +713,16 @@ function App() {
                 <button
                   className="secondary"
                   disabled={busy}
-                  onClick={() => change({ paused: !d!.paused })}
+                  onClick={() =>
+                    run(async () => {
+                      requireSaved();
+                      await api("projects/" + active.id, "PUT", {
+                        revision: active.revision,
+                        document: { ...d!, paused: !d!.paused },
+                      });
+                      await refresh();
+                    })
+                  }
                 >
                   {d!.paused ? "Продолжить" : "Пауза"}
                 </button>

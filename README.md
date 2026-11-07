@@ -56,6 +56,20 @@ Known external IDs are polled and fetched again without generation resubmission.
 
 ## Render deployment
 
+**Deployment is on hold. Do not apply the existing Blueprint without explicit cost approval.** The `render.yaml` file describes the original always-on-worker option, not the recommended small-volume setup. See [hosting costs and alternatives](docs/hosting.md).
+
+For an explicitly launched on-demand PostgreSQL worker, run `node worker-session.js`. It processes pending work, waits through provider polling delays, and exits when the queue is empty or after a 15-minute claim window (`WORKER_SESSION_SECONDS`, maximum 3600). A running task finishes gracefully after the window. Paused/archived projects do not keep the session alive. Remaining work stays in PostgreSQL for the next session. This command does not create Render resources or call Render's control API. Automatic on-demand job launch/relaunch is not implemented; the operator must explicitly launch another session for later work. Do not use the perpetual `worker.js` command for a billed one-off job.
+
+### Persistent local demo with real processing
+
+While `npm run local` is running, open a second terminal in the repository and run:
+
+```powershell
+node --env-file=.env.local scripts/seed-local-demo.js
+```
+
+It creates a new sample project through the authenticated API, uploads synthetic audio and three video clips, waits for actual analysis, selects approved media and produces a real ZIP from that project's timeline. It makes no AI requests. Sign in using `.local/login.txt` to edit this persistent project and export your changes. The generated package is also saved as `.local/demo-export.zip`. Each execution creates a separate sample project; existing work is preserved.
+
 `render.yaml` creates **clip-maker-studio**, **clip-maker-worker**, **clip-maker-db** and **clip-maker-config**. It does not target `dukhy-lisu` or any existing website. Docker installs FFmpeg. Review Render's selected plans and cost before creating these resources. Start with one worker; rendering is CPU-intensive and uses temporary disk proportional to the export package. Keep persistent assets in S3.
 
 Set the configuration values in Render and `APP_ORIGIN` to the exact new HTTPS service origin, without trailing slash. Set a strong `ADMIN_PASSWORD`. `TRUST_PROXY_HOPS` defaults to 1 for the Render proxy. If you change proxy topology, review this and rate limiting before public use. In-memory rate limits apply per web instance; keep one web instance or add a shared limiter before horizontal scaling.
