@@ -1,0 +1,6 @@
+node_modules
+dist
+.local
+public/demo
+.env*
+package-lock.json

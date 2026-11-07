@@ -1,34 +1,85 @@
-# Clip Maker — studio foundation
+# Clip Maker
 
-This milestone is a working project and storyboard editor, **not the complete Phase 1 or video-production MVP**. React/TypeScript frontend, Express backend, PostgreSQL persistence. It supports a private owner login with hashed opaque database sessions, project creation/duplication/archive, timed scene CRUD and concept approval, character/location text profiles and approvals, optimistic concurrency, and an explicitly temporary in-memory demo. No paid jobs are submitted.
+Private music-video production studio: React/TypeScript, Express, PostgreSQL, private S3 storage and a separate FFmpeg worker. The interface is in Russian. The director explicitly approves concepts, references, storyboard and individual media versions.
 
-## Local setup
+## Run locally on Windows
 
-Node 24 and PostgreSQL are required. Create an empty `clipmaker` database. Copy `.env.example` to `.env`, choose a random password of at least 16 characters, and set the database connection. Never commit `.env`.
+Node.js 24 is required. Windows FFmpeg binaries are optional npm dependencies; on Linux install `ffmpeg` with your OS package manager.
 
-```
+```powershell
 npm ci
-npm test
+npm run setup:local
 npm run build
-node --env-file=.env server.js
+npm run local
 ```
 
-Open http://localhost:3000. Database tables are created idempotently on startup from `migrations/001.sql`. This migration is additive; future schema changes need numbered migrations and a migration ledger. The private studio has one owner identity, no public registration. Sessions expire after 12 hours. Set `APP_ORIGIN` to the exact browser origin (no trailing slash). Demo data disappears on reload; authenticated projects persist in PostgreSQL. The demo can be previewed with `npm run dev`; authenticated development uses the built server.
+Open `http://localhost:3000`. A generated private password is saved in `.local/login.txt`; `.env.local` contains local settings. Both are ignored by git. Use **Посмотреть демо** without signing in to explore the clearly labeled synthetic sample. Demo changes live only until reload, and its export is a fixed example package, not a rendering of current demo edits.
 
-## Render
+Local mode persists data in PGlite, an embedded PostgreSQL engine, under `.local/db`, and media under `.local/media`. Only one local server process may open it. The local launcher runs the queue coordinator in-process; FFmpeg runs as a child process. Production uses actual PostgreSQL and a separate worker service. The server refuses local media storage in production.
 
-Create a **new Blueprint** for this repository using `render.yaml`; it names only `clip-maker-studio` and `clip-maker-db`. Review Render's selected compute/database plans and costs before creation. Set ADMIN_PASSWORD and APP_ORIGIN to the new service's HTTPS origin. Never attach this application to `dukhy-lisu`. No service or DNS changes have been performed by this implementation. Once separately approved/configured, `clips.andygraviton.com` can be attached in Render and APP_ORIGIN updated. Reference: https://render.com/docs/blueprint-spec and https://render.com/docs/deploy-node-express-app.
+For regular PostgreSQL, copy `.env.example` to `.env`, configure it, then run `node --env-file=.env server.js` and `node --env-file=.env worker.js` in separate terminals. The web server binds loopback in development. Do not expose development mode publicly.
 
-## API and consistency
+## Implemented workflow
 
-POST /api/login, POST /api/logout; GET/POST /api/projects; PUT /api/projects/:id. Writes require the exact Origin and an authenticated HttpOnly SameSite cookie. PUT includes `{revision,document}` and returns 409 on conflicting edits. Project bodies are validated by Zod. Editing a scene clears its concept approval in the UI. Scene ordering is independent of explicit timestamps; moving a scene does not silently move its timecodes. Timeline currently lists timestamps, not a media playback timeline. Projects use one private owner workspace.
+1. Create a project, upload MP3/WAV, wait for analysis, then approve/select the track. Uploads are checked by file signatures, limited to 256 MB (images 20 MB), and analyzed by the worker. Audio must be at most one hour.
+2. Write the concept or request an AI screenplay. AI results remain job results until explicitly applied. Applying a draft archives the previous project document and clears approvals.
+3. Save edits before approving concept/style/storyboard checkpoints. Choose a style frame, then character/location images. Profiles include appearance, clothes, notes and text variants. A scene can reference multiple characters and one location. Variant-specific image selection is a future extension; current generation uses each profile's chosen reference and base clothing.
+4. Edit scenes with timestamps, framing, movement and separate image/video prompts. Drag cards to change display order; explicit times remain unchanged. Use Timeline to scrub real audio, mark beats, define musical sections, and change boundaries. Automatic musical structure/beat detection is deliberately not claimed.
+5. Generate single or selected batches of images/video after an explicit cost confirmation. Compare versions, approve/reject them, choose final versions, or approve selected media as a batch. Rejected and superseded assets remain available.
+6. Queue work survives restarts. Pause blocks new processing/polling; already submitted remote work may still finish and charge at the provider. Resume retrieves it. Cancel only removes locally queued jobs. Provider cancellation exists in the adapter but is not exposed as guaranteed billing cancellation.
+7. Export approved selected videos and music as a ZIP with frame-aligned FCP 7 XML, normalized clips, original music, editing WAV, manifest and a Windows path-relink script.
 
-## Remaining work, in order
+## Provider configuration
 
-1. Complete Phase 1: S3 private assets with validated upload limits and authorized download URLs; audio upload and worker-based ffprobe/waveform; real reference images, wardrobe variants, scene reference assignments, waveform playback/scrubbing, musical sections; richer pipeline approvals and drag reorder.
-2. Add durable PostgreSQL job queue/independent worker and provider adapters. Preserve immutable asset versions. Require explicit user approval at each production checkpoint. Research official provider documentation before implementing OpenAI, Kling or Seedance. They are **not integrated** here.
-3. Add generation idempotency and external job reconciliation, bounded concurrency, retry policy, project budget reservation and confirmed-cost ledger. Unknown pricing must remain unavailable.
-4. Implement export worker with FFmpeg, selected video versions, media ZIP, manifest and validated FCP 7 XML. Test the actual import in Premiere on Windows. No XML or Premiere compatibility is claimed in this milestone.
-5. Add end-to-end database/session tests and browser verification before production use. Current automated tests cover input validation only. Production authentication needs operational review of proxy configuration and deployment-level rate limits; current rate limits are per-process.
+Set credentials only in environment variables, never the browser:
 
-No media, queues, AI calls, exports, cost estimates or fake generated assets are presented as implemented. Google Fonts is optional presentation only; the interface falls back to system sans-serif.
+| Purpose    | Settings                                                                            | Implemented adapter                                                     |
+| ---------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Images     | `FAL_KEY`                                                                           | FLUX Kontext Max text-to-image and experimental multi-reference editing |
+| Video      | `FAL_KEY`                                                                           | Kling 3 Standard and Seedance 1 Pro through fal.ai                      |
+| Screenplay | `OPENAI_API_KEY`, `OPENAI_MODEL`                                                    | OpenAI Chat Completions JSON mode; output validated before use          |
+| Media      | `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | Private S3-compatible bucket                                            |
+
+The model must be accessible to your account. Configuration indicators report whether settings exist, **not** verified account access, credits or successful generation. No paid provider requests were made during implementation. Contracts were checked against [the documented APIs](docs/providers.md); network behavior is tested with injected adapters. These integrations still require live credential verification.
+
+The bucket must be private and the server credential restricted to its object operations. Files are served through authenticated endpoints; S3 downloads use signed URLs valid for one hour. People holding a signed URL can access that object until it expires. Never log signed URLs. Local reference files are sent to fal as data URIs; S3 references use signed URLs.
+
+Optional `PROVIDER_ESTIMATES_JSON` maps `flux-text`, `flux-reference`, `kling`, `seedance` and `screenplay` to `{ "usd": <verified-number>, "unit": "request" | "second" }`. No prices are supplied. Estimates are operator-maintained, not confirmed charges. Unavailable costs require explicit acknowledgment; a configured project spending limit blocks unpriced work. Budget checks reserve estimates transactionally and conservatively retain reservations for failed/uncertain paid jobs. This bounds estimated commitments, not a provider's final bill. Confirmed cost fields are reserved for a future verified billing reconciliation integration.
+
+## Durable jobs and failure handling
+
+The PostgreSQL queue uses row locks, leases, heartbeat and `SKIP LOCKED`; `PROVIDER_CONCURRENCY` defaults to 2 external requests. Each quote is tied to a project revision, expires after five minutes, and creates each target only once. Confirmation and budget reservation are one database transaction.
+
+A worker persists `submitting` **before** contacting a paid service. If acceptance cannot be established (timeout, crash, malformed response), the job becomes `uncertain`; it is never automatically resubmitted. For fal, retrieve the correct Request ID from provider history and use **Сверить с провайдером**. The application then polls that existing request. This is intentionally conservative: without a provider-supported idempotency contract, automatic exactly-once paid submission cannot be guaranteed. Uncertain screenplay submissions require operator review; no automatic retry exists for them.
+
+Known external IDs are polled and fetched again without generation resubmission. Download failures can be retried. Expired provider download links are handled by retrieving the existing result again; regeneration is never automatic. Media downloads allow only documented fal media hosts over HTTPS, validate redirects, pin DNS resolution to public IPv4, enforce size/time limits, and validate downloaded content. Webhooks are not used; polling avoids duplicate webhook side effects.
+
+## Render deployment
+
+`render.yaml` creates **clip-maker-studio**, **clip-maker-worker**, **clip-maker-db** and **clip-maker-config**. It does not target `dukhy-lisu` or any existing website. Docker installs FFmpeg. Review Render's selected plans and cost before creating these resources. Start with one worker; rendering is CPU-intensive and uses temporary disk proportional to the export package. Keep persistent assets in S3.
+
+Set the configuration values in Render and `APP_ORIGIN` to the exact new HTTPS service origin, without trailing slash. Set a strong `ADMIN_PASSWORD`. `TRUST_PROXY_HOPS` defaults to 1 for the Render proxy. If you change proxy topology, review this and rate limiting before public use. In-memory rate limits apply per web instance; keep one web instance or add a shared limiter before horizontal scaling.
+
+After deployment verification, add `clips.andygraviton.com` to **this new service** and update `APP_ORIGIN`. Domain/DNS changes and production deployment have not been performed. See [Render Blueprint reference](https://render.com/docs/blueprint-spec).
+
+Migrations run transactionally using `schema_migrations` and a table lock. Back up PostgreSQL and S3 before production migrations. Existing project documents are normalized with additive defaults; edits retain a revision snapshot in `project_history`. There is currently no history browser/restore UI. Archive is reversible. Cross-project duplication copies creative text and scenes, clears media selections/approvals, and keeps source media in its original project.
+
+## Premiere export
+
+See [Premiere import instructions](docs/premiere.md). XML structure and timing are tested, and an actual ZIP is generated from synthetic media in integration tests. **Import in Adobe Premiere Pro has not been tested here.** Verify the sample package in your installed Premiere version before relying on it for a full production. Native `.prproj`, transitions, multitrack effects and direct Premiere automation are not implemented.
+
+## Verification
+
+```text
+npm run lint
+npm run build
+npm test
+```
+
+`lint` checks consistent formatting; the build type-checks the frontend. Integration tests use real embedded PostgreSQL SQL semantics, local HTTP endpoints, FFmpeg and filesystem storage. They cover authentication/CSRF, conflicting edits, file type checks, ownership boundaries, actual audio/video analysis and ZIP export, paid submission ambiguity, queue recovery, idempotent confirmation, budget reservation and XML timing. Provider calls are mocked; S3/Render/live AI services are not end-to-end verified. CI repeats the checks on Ubuntu with system FFmpeg.
+
+Browser checks exercised the demo, batch confirmation, result selection, audio seeking, beat editing and responsive layouts at narrow and desktop widths. Paid AI output quality and reference consistency depend on the selected provider.
+
+## Deliberate scope limits
+
+This is a private single-owner studio. It does not yet include public signup, multiple tenants, Telegram, n8n automation, cross-project asset sharing, automatically verified billing, automatic beat detection, per-outfit reference generation, or a full Windows downloader app. The included `Relink.ps1` is a local package utility and opens no inbound connection. Further integration points are documented in [architecture notes](docs/architecture.md).

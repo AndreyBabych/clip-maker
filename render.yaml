@@ -1,15 +1,11 @@
 services:
   - type: web
     name: clip-maker-studio
-    runtime: node
-    buildCommand: npm ci && npm run build
-    startCommand: npm start
+    runtime: docker
+    dockerfilePath: ./Dockerfile
     healthCheckPath: /health
     envVars:
-      - key: NODE_ENV
-        value: production
-      - key: NODE_VERSION
-        value: 24.19.0
+      - fromGroup: clip-maker-config
       - key: DATABASE_URL
         fromDatabase:
           name: clip-maker-db
@@ -18,5 +14,41 @@ services:
         sync: false
       - key: APP_ORIGIN
         sync: false
+  - type: worker
+    name: clip-maker-worker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerCommand: node worker.js
+    envVars:
+      - fromGroup: clip-maker-config
+      - key: DATABASE_URL
+        fromDatabase:
+          name: clip-maker-db
+          property: connectionString
 databases:
   - name: clip-maker-db
+envVarGroups:
+  - name: clip-maker-config
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: STORAGE_MODE
+        value: s3
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_REGION
+        value: auto
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: FAL_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        sync: false
+      - key: PROVIDER_CONCURRENCY
+        value: "2"
