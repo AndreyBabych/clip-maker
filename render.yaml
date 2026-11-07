@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: clip-maker-studio
+    runtime: node
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 24.19.0
+      - key: DATABASE_URL
+        fromDatabase:
+          name: clip-maker-db
+          property: connectionString
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: APP_ORIGIN
+        sync: false
+databases:
+  - name: clip-maker-db
