@@ -31,7 +31,10 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - run: npm ci
       - run: npm run lint
+      - name: Reproduce local server environment during frontend build
+        run: node -e "require('node:fs').writeFileSync('.env.local', 'NODE_ENV=development\n')"
       - run: npm run build
+      - run: node scripts/check-frontend-build.js
       - run: npm test
         env:
           TEST_DATABASE_URL: postgresql://test_user:disposable_ci_only@localhost:5432/clipmaker_test

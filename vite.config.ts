@@ -1,6 +1,8 @@
 import { defineConfig } from "vite";
 export default defineConfig({
-  define: { "process.env.NODE_ENV": JSON.stringify("production") },
+  // .env.local belongs to the Node server, including NODE_ENV=development.
+  // Let Vite choose matching React and JSX runtimes for build/dev itself.
+  envDir: false,
   build: {
     rollupOptions: {
       output: {
