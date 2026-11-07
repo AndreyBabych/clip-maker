@@ -31,6 +31,7 @@ const document = () =>
 before(async () => {
   dir = await mkdtemp(path.join(tmpdir(), "clip-tests-"));
   env = {
+    DATABASE_URL: process.env.TEST_DATABASE_URL,
     NODE_ENV: "test",
     LOCAL_DATA_DIR: dir,
     STORAGE_MODE: "local",

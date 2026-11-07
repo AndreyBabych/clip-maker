@@ -2,6 +2,8 @@ services:
   - type: web
     name: clip-maker-studio
     runtime: docker
+    region: frankfurt
+    plan: 0.5c-512mb
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
     envVars:
@@ -14,30 +16,8 @@ services:
         sync: false
       - key: APP_ORIGIN
         sync: false
-  - type: worker
-    name: clip-maker-worker
-    runtime: docker
-    dockerfilePath: ./Dockerfile
-    dockerCommand: node worker.js
-    envVars:
-      - fromGroup: clip-maker-config
-      - key: DATABASE_URL
-        fromDatabase:
-          name: clip-maker-db
-          property: connectionString
-databases:
-  - name: clip-maker-db
-envVarGroups:
-  - name: clip-maker-config
-    envVars:
-      - key: NODE_ENV
-        value: production
-      - key: STORAGE_MODE
-        value: s3
       - key: S3_ENDPOINT
         sync: false
-      - key: S3_REGION
-        value: auto
       - key: S3_BUCKET
         sync: false
       - key: S3_ACCESS_KEY_ID
@@ -50,5 +30,47 @@ envVarGroups:
         sync: false
       - key: OPENAI_MODEL
         sync: false
+  - type: worker
+    name: clip-maker-worker
+    runtime: docker
+    region: frankfurt
+    plan: 1c-2g
+    dockerfilePath: ./Dockerfile
+    dockerCommand: node worker.js
+    envVars:
+      - fromGroup: clip-maker-config
+      - key: DATABASE_URL
+        fromDatabase:
+          name: clip-maker-db
+          property: connectionString
+      - key: S3_ENDPOINT
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: FAL_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        sync: false
+databases:
+  - name: clip-maker-db
+    region: frankfurt
+    plan: 0.1c-256mb
+    diskSizeGB: 1
+    ipAllowList: []
+envVarGroups:
+  - name: clip-maker-config
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: STORAGE_MODE
+        value: s3
+      - key: S3_REGION
+        value: auto
       - key: PROVIDER_CONCURRENCY
         value: "2"
