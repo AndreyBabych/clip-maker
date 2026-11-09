@@ -942,7 +942,18 @@ function App() {
                     disabled={busy || dirty}
                     onClick={() => run(approveStep)}
                   >
-                    Утвердить {tab.toLowerCase()} →
+                    Утвердить{" "}
+                    {
+                      (
+                        {
+                          Ключ: "ключ",
+                          Сюжет: "сюжет",
+                          Раскадровка: "раскадровку",
+                          Генерация: "генерацию",
+                        } as Record<string, string>
+                      )[tab]
+                    }{" "}
+                    →
                   </button>
                 )
               )}
