@@ -26,6 +26,12 @@ export type Scene = {
   videoId: string | null;
 };
 export type Doc = {
+  workflow: {
+    key: boolean;
+    story: boolean;
+    board: boolean;
+    generation: boolean;
+  };
   title: string;
   idea: string;
   lyrics: string;
@@ -100,6 +106,7 @@ export type Config = {
   storage: string;
   fal: boolean;
   screenplay: boolean;
+  transcription?: boolean;
   local: boolean;
   models: Record<string, { name: string; min?: number; max?: number }>;
 };
@@ -111,6 +118,7 @@ export type Quote = {
   models: string[];
 };
 export const empty = (): Doc => ({
+  workflow: { key: false, story: false, board: false, generation: false },
   title: "Новый клип",
   idea: "",
   lyrics: "",

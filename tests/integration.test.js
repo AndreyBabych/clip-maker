@@ -209,6 +209,7 @@ test("audio, waveform, approval, scene video and actual Premiere ZIP export", as
     ...p.document,
     conceptApproved: true,
     storyboardApproved: true,
+    workflow: { key: true, story: true, board: true, generation: true },
   });
   const quote = await prepareQuote(db, env, storage, p.id, {
     kind: "export",

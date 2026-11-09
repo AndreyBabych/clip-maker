@@ -38,6 +38,14 @@ const reference = z.object({
 });
 export const projectSchema = z
   .object({
+    workflow: z
+      .object({
+        key: z.boolean().default(false),
+        story: z.boolean().default(false),
+        board: z.boolean().default(false),
+        generation: z.boolean().default(false),
+      })
+      .prefault({}),
     title: z.string().min(1).max(200),
     idea: z.string().max(50000),
     lyrics: text.default(""),
@@ -89,6 +97,25 @@ export function fail(message, status = 400) {
   throw Object.assign(new Error(message), { status, public: true });
 }
 export function normalizeUpdate(old, next) {
+  if (old.styleId !== next.styleId || old.stylePrompt !== next.stylePrompt)
+    next.workflow = {
+      key: false,
+      story: false,
+      board: false,
+      generation: false,
+    };
+  else if (old.idea !== next.idea || old.concept !== next.concept)
+    next.workflow = {
+      ...next.workflow,
+      story: false,
+      board: false,
+      generation: false,
+    };
+  else if (
+    old.audioId !== next.audioId ||
+    JSON.stringify(old.scenes) !== JSON.stringify(next.scenes)
+  )
+    next.workflow = { ...next.workflow, board: false, generation: false };
   if (old.idea !== next.idea || old.concept !== next.concept)
     next.conceptApproved = false;
   if (old.stylePrompt !== next.stylePrompt) next.styleId = null;
@@ -135,8 +162,8 @@ export function normalizeUpdate(old, next) {
   return next;
 }
 export function assertImageGate(d, s, assets) {
-  if (!d.conceptApproved || !d.storyboardApproved)
-    fail("Approve the concept and storyboard first");
+  if (!d.conceptApproved || !d.workflow.key || !d.workflow.story)
+    fail("Approve the key image and story first");
   const approvedImage = (assetId) =>
     assets.some(
       (a) => a.id === assetId && a.state === "approved" && a.kind === "image",

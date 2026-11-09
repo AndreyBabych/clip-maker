@@ -1,5 +1,13 @@
 # Clip Maker
 
+## Five-step studio migration (November 2026)
+
+The project now opens in the five-stage wizard: **Ключ → Сюжет → Раскадровка → Генерация → Монтаж**. The previous editor panels are grouped inside those steps, using the same projects, assets, job queue, authentication, provider adapters and export format. `document.workflow` stores explicit stage approvals; old documents receive unapproved defaults when read. Editing an approved step requires an unlock action and marks downstream approvals stale while keeping old media versions and the project history.
+
+The storyboard player switches the selected static image according to the actual audio player's current time. A local provisional shot split can be proposed from track length; it is a timing helper, not an AI interpretation of beats. AI screenplay generation can now start before the track is uploaded, with provisional timing. The voice button records at most one minute and uses OpenAI `gpt-transcribe` when `OPENAI_API_KEY` is configured; it is disabled without a key. See [official transcription documentation](https://developers.openai.com/api/docs/guides/speech-to-text). Live transcription and paid generation are unverified without credentials.
+
+Current gaps: AI does not yet derive shot count or targeted natural-language storyboard edits; the provisional split is deterministic. Video feedback is appended to the generation prompt, not rewritten by a separate AI prompt engineer. The demo export still downloads a clearly labeled fixed sample ZIP. Import in the user's installed Premiere remains unverified. Local browser automation was unavailable in this development session, so the new wizard has not yet had visual acceptance testing. Do not treat the new workflow as production-ready until that pass is done.
+
 Private music-video production studio: React/TypeScript, Express, PostgreSQL, private S3 storage and a separate FFmpeg worker. The interface is in Russian. The director explicitly approves concepts, references, storyboard and individual media versions.
 
 ## Run locally on Windows

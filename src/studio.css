@@ -733,3 +733,59 @@ button:hover:not(:disabled) {
   padding: 6px;
   border-radius: 4px;
 }
+.step-status {
+  display: block;
+  margin-left: 29px;
+  font-size: 10px;
+  opacity: 0.7;
+  font-weight: 400;
+}
+.wizard-actions {
+  margin: 18px 0 24px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.wizard-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.wizard-tabs button.selected {
+  background: #bcea80;
+  color: #172018;
+}
+.story-preview {
+  text-align: center;
+  background: #080d11;
+}
+.story-preview img {
+  display: block;
+  width: 100%;
+  max-height: 62vh;
+  object-fit: contain;
+  margin: auto;
+}
+.generation-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+  gap: 16px;
+}
+.generation-grid img,
+.generation-grid video {
+  width: 100%;
+  max-height: 240px;
+  object-fit: contain;
+  display: block;
+  margin: 12px 0;
+}
+.generation-grid textarea {
+  width: 100%;
+  min-height: 80px;
+}
+.approved-summary .heroimage {
+  max-height: 55vh;
+  object-fit: contain;
+}

@@ -16,6 +16,7 @@ export function initDemo() {
     styleId = crypto.randomUUID();
   const d = empty();
   Object.assign(d, {
+    workflow: { key: false, story: false, board: false, generation: false },
     title: "После последнего света",
     idea: "Ночной город замирает. Одинокий музыкант идёт навстречу рассвету.",
     concept:

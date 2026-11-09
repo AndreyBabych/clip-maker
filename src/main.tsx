@@ -66,13 +66,17 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 function App() {
+  const [recording, setRecording] = useState(false);
+  const recorder = useRef<MediaRecorder | null>(null);
   const [approvalSelection, setApprovalSelection] = useState<string[]>([]);
   const [logged, setLogged] = useState(false),
     [demo, setDemo] = useState(false),
     [password, setPassword] = useState(""),
     [projects, setProjects] = useState<Project[]>([]),
     [active, setActive] = useState<Detail | null>(null),
-    [tab, setTab] = useState("История"),
+    [tab, setTab] = useState("Ключ"),
+    [panel, setPanel] = useState("Стиль"),
+    [revisionUnlocked, setRevisionUnlocked] = useState(false),
     [config, setConfig] = useState<Config | null>(null),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
@@ -95,6 +99,61 @@ function App() {
   dirtyRef.current = dirty;
   const api = (path: string, method = "GET", body?: unknown) =>
     demo ? demoApi(path, method, body) : request(path, method, body);
+  const VoiceButton = ({ onText }: { onText: (text: string) => void }) => (
+    <button
+      type="button"
+      className="secondary"
+      disabled={!config?.transcription && !recording}
+      title={
+        !config?.transcription
+          ? "Для голоса нужен OPENAI_API_KEY"
+          : "Запись до 60 секунд"
+      }
+      onClick={async () => {
+        if (recording) {
+          recorder.current?.stop();
+          return;
+        }
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+          });
+          const mime = ["audio/webm", "audio/mp4"].find((v) =>
+            MediaRecorder.isTypeSupported(v),
+          );
+          if (!mime) throw Error("Браузер не поддерживает запись голоса");
+          const r = new MediaRecorder(stream, { mimeType: mime });
+          const chunks: Blob[] = [];
+          r.ondataavailable = (e) => chunks.push(e.data);
+          r.onstop = async () => {
+            setRecording(false);
+            stream.getTracks().forEach((t) => t.stop());
+            try {
+              const body = new FormData();
+              body.set(
+                "file",
+                new File(chunks, "voice." + mime.split("/")[1], { type: mime }),
+              );
+              const result = await request("transcribe", "POST", body);
+              onText(result.text);
+            } catch (e) {
+              setError((e as Error).message);
+            }
+          };
+          recorder.current = r;
+          r.start();
+          setRecording(true);
+          setTimeout(() => {
+            if (r.state === "recording") r.stop();
+          }, 60000);
+        } catch (e) {
+          setError((e as Error).message);
+        }
+      }}
+    >
+      {recording ? "■ Остановить запись" : "🎙 Надиктовать"}
+    </button>
+  );
   const run = async (fn: () => Promise<void>) => {
     if (busy) return;
     setBusy(true);
@@ -199,14 +258,18 @@ function App() {
     setDirty(false);
     setSelected([]);
     setCompare([]);
-    setTab("История");
+    setTab("Ключ");
+    setPanel("Стиль");
+    setRevisionUnlocked(false);
   };
   const create = async (doc = empty()) => {
     const p = await api("projects", "POST", doc);
     setProjects(await api("projects"));
     setActive(await api("projects/" + p.id));
     setDirty(false);
-    setTab("История");
+    setTab("Ключ");
+    setPanel("Стиль");
+    setRevisionUnlocked(false);
   };
   const url = (a: Asset) =>
     demo ? demoUrl(a) : "/api/assets/" + a.id + "/file";
@@ -465,18 +528,104 @@ function App() {
     unknown = active?.jobs.some(
       (j) => j.estimated === null && j.confirmed === null,
     );
-  const tabs = [
-    "История",
-    "Стиль",
-    "Персонажи",
-    "Локации",
-    "Раскадровка",
-    "Таймлайн",
-    "Медиатека",
-    "Очередь",
-    "Экспорт",
-    "Настройки",
+  const tabs = ["Ключ", "Сюжет", "Раскадровка", "Генерация", "Монтаж"];
+  const panels: Record<string, string[]> = {
+    Ключ: ["Стиль"],
+    Сюжет: ["История", "Персонажи", "Локации"],
+    Раскадровка: ["Таймлайн", "Раскадровка"],
+    Генерация: ["Генерация", "Медиатека", "Очередь"],
+    Монтаж: ["Экспорт", "Настройки"],
+  };
+  const approved = [
+    Boolean(d?.workflow?.key),
+    Boolean(d?.workflow?.story),
+    Boolean(d?.workflow?.board),
+    Boolean(d?.workflow?.generation),
+    false,
   ];
+  const stepIndex = tabs.indexOf(tab),
+    stepApproved = approved[stepIndex];
+  const stepStatus = (i: number) =>
+    approved[i]
+      ? "Утверждено"
+      : i > 0 && !approved[i - 1]
+        ? "Закрыто"
+        : active?.jobs.some((j) =>
+              ["queued", "polling", "processing", "submitting"].includes(
+                j.state,
+              ),
+            ) && i === stepIndex
+          ? "В работе"
+          : i === stepIndex
+            ? "Ожидает утверждения"
+            : "Не начато";
+  const approveStep = async () => {
+    const p = activeRef.current!;
+    const document = { ...p.document, workflow: { ...p.document.workflow } };
+    if (tab === "Ключ") {
+      if (
+        !document.styleId ||
+        !p.assets.some(
+          (a) => a.id === document.styleId && a.state === "approved",
+        )
+      )
+        throw Error("Сначала выбери утверждённое ключевое изображение");
+      document.workflow.key = true;
+    }
+    if (tab === "Сюжет") {
+      if (!document.idea.trim() && !document.concept.trim())
+        throw Error("Сначала опиши сюжет");
+      document.conceptApproved = true;
+      document.workflow.story = true;
+    }
+    if (tab === "Раскадровка") {
+      if (!document.audioId) throw Error("Загрузи и выбери музыку");
+      const length =
+        p.assets.find((a) => a.id === document.audioId)?.metadata.duration || 0;
+      const shots = [...document.scenes].sort((a, b) => a.start - b.start);
+      if (
+        !shots.length ||
+        Math.abs(shots[0].start) > 0.04 ||
+        Math.abs(shots.at(-1)!.end - length) > 0.1 ||
+        shots.some(
+          (s, i) =>
+            !s.approved ||
+            !s.imageId ||
+            !p.assets.some(
+              (a) => a.id === s.imageId && a.state === "approved",
+            ) ||
+            (i > 0 && Math.abs(shots[i - 1].end - s.start) > 0.04),
+        )
+      )
+        throw Error(
+          "Нужны утверждённые кадры без пропусков на всю длину музыки",
+        );
+      document.scenes = document.scenes.map((s) => ({ ...s, approved: true }));
+      document.storyboardApproved = true;
+      document.workflow.board = true;
+    }
+    if (tab === "Генерация") {
+      if (
+        !document.scenes.length ||
+        document.scenes.some(
+          (s) =>
+            !s.videoId ||
+            !p.assets.some((a) => a.id === s.videoId && a.state === "approved"),
+        )
+      )
+        throw Error("Утверди видео для каждой сцены");
+      document.workflow.generation = true;
+    }
+    const saved = await api("projects/" + p.id, "PUT", {
+      revision: p.revision,
+      document,
+    });
+    setActive({ ...p, ...saved });
+    setDirty(false);
+    setRevisionUnlocked(false);
+    setTab(tabs[Math.min(stepIndex + 1, 4)]);
+    setPanel(panels[tabs[Math.min(stepIndex + 1, 4)]][0]);
+  };
   return (
     <div className="shell">
       <aside>
@@ -499,23 +648,18 @@ function App() {
         {tabs.map((t, i) => (
           <button
             key={t}
-            disabled={!active}
+            disabled={!active || (i > 0 && !approved[i - 1] && !approved[i])}
             className={active && tab === t ? "selected" : ""}
             onClick={() => {
               setTab(t);
+              setPanel(panels[t][0]);
+              setRevisionUnlocked(false);
               window.scrollTo({ top: 0 });
             }}
           >
-            <span className="navicon">
-              {["✧", "◐", "♙", "⌖", "▤", "≋", "▧", "◷", "↗", "⚙"][i]}
-            </span>
-            {t}
-            {t === "Очередь" &&
-              active?.jobs.some((j) =>
-                ["queued", "polling", "submitting", "processing"].includes(
-                  j.state,
-                ),
-              ) && <i className="dot" />}
+            <span className="navicon">{["◈", "✧", "▤", "◐", "↗"][i]}</span>
+            {t} {approved[i] ? "✓" : ""}
+            <small className="step-status">{active && stepStatus(i)}</small>
           </button>
         ))}
         <footer>
@@ -747,1183 +891,1442 @@ function App() {
               </div>
             </div>
             <div className="pipeline">
-              {[
-                ["Идея", d!.conceptApproved],
-                ["Стиль", Boolean(d!.styleId)],
-                ["Сцены", d!.storyboardApproved],
-                [
-                  "Кадры",
-                  d!.scenes.length > 0 && d!.scenes.every((s) => s.imageId),
-                ],
-                [
-                  "Видео",
-                  d!.scenes.length > 0 && d!.scenes.every((s) => s.videoId),
-                ],
-              ].map(([name, ok], i) => (
-                <div className={ok ? "done" : ""} key={String(name)}>
-                  <span>{ok ? "✓" : i + 1}</span>
+              {tabs.map((name, i) => (
+                <div className={approved[i] ? "done" : ""} key={name}>
+                  <span>{approved[i] ? "✓" : i + 1}</span>
                   {name}
                 </div>
               ))}
             </div>
-            {tab === "История" && (
-              <div className="twocol">
-                <section>
-                  <h2>Музыка и замысел</h2>
-                  <Field label="Название">
-                    <input
-                      value={d!.title}
-                      onChange={(e) => change({ title: e.target.value })}
-                    />
-                  </Field>
-                  <Field label="Идея клипа">
-                    <textarea
-                      rows={5}
-                      placeholder="Расскажи историю так, как ты её видишь…"
-                      value={d!.idea}
-                      onChange={(e) =>
-                        change({ idea: e.target.value, conceptApproved: false })
-                      }
-                    />
-                  </Field>
-                  <Field label="Текст песни (необязательно)">
-                    <textarea
-                      value={d!.lyrics}
-                      onChange={(e) => change({ lyrics: e.target.value })}
-                    />
-                  </Field>
-                  <Field label="Сценарная концепция">
-                    <textarea
-                      rows={5}
-                      value={d!.concept}
-                      onChange={(e) =>
-                        change({
-                          concept: e.target.value,
-                          conceptApproved: false,
-                        })
-                      }
-                    />
-                  </Field>
+            <div className="wizard-actions">
+              <div className="wizard-tabs">
+                {panels[tab].map((name) => (
                   <button
-                    className={d!.conceptApproved ? "secondary" : ""}
-                    onClick={() =>
-                      change({ conceptApproved: !d!.conceptApproved })
-                    }
+                    key={name}
+                    className={panel === name ? "selected" : "ghost"}
+                    onClick={() => setPanel(name)}
                   >
-                    {d!.conceptApproved
-                      ? "✓ Концепция утверждена"
-                      : "Утвердить концепцию"}
+                    {name}
                   </button>
-                </section>
-                <div>
-                  <section>
-                    <h2>Музыкальный трек</h2>
-                    <p>
-                      MP3 или WAV, до 256 МБ и одного часа. Длительность и
-                      waveform анализируются в фоне.
-                    </p>
-                    <Upload
-                      kind="audio"
-                      target="audio"
-                      label="Загрузить трек"
-                    />
-                    {audio && <audio controls src={url(audio)} />}
-                    <AssetGrid target="audio" />
-                  </section>
-                  <section>
-                    <div className="eyebrow">AI СОАВТОР</div>
-                    <h2>Развить историю</h2>
-                    <p>
-                      Ассистент предложит сценарий и план кадров. Применение
-                      черновика всегда остаётся за тобой.
-                    </p>
-                    <textarea
-                      placeholder="Пожелания или правки к следующему варианту…"
-                      value={feedback}
-                      onChange={(e) => setFeedback(e.target.value)}
-                    />
-                    <button
-                      disabled={busy || (!demo && !config?.screenplay)}
-                      onClick={() =>
-                        run(() => generate("screenplay", ["project"]))
-                      }
-                    >
-                      Предложить сценарий →
-                    </button>
-                    {!demo && !config?.screenplay && (
-                      <small>Провайдер сценария не настроен.</small>
-                    )}
-                  </section>
-                  <section>
-                    <h2>Референсы проекта</h2>
-                    <Upload
-                      kind="image"
-                      target="reference"
-                      label="Изображение"
-                    />
-                    <Upload kind="video" target="reference" label="Видео" />
-                    <AssetGrid target="reference" />
-                  </section>
-                </div>
+                ))}
               </div>
-            )}
-            {tab === "Стиль" && (
-              <>
-                <section>
-                  <div className="twocol">
-                    <div>
-                      <h2>Визуальный язык</h2>
-                      <p>
-                        Сначала выбери направление. Этот кадр станет референсом
-                        для персонажей, локаций и сцен.
-                      </p>
-                      <textarea
-                        rows={5}
-                        value={d!.stylePrompt}
-                        placeholder="Свет, палитра, фактура, эпоха, настроение…"
-                        onChange={(e) =>
-                          change({ stylePrompt: e.target.value, styleId: null })
-                        }
-                      />
-                      <div className="actions">
-                        <button
-                          disabled={busy}
-                          onClick={() =>
-                            run(() => generate("image", ["style"]))
-                          }
-                        >
-                          Создать вариант
-                        </button>
-                        <Upload
-                          kind="image"
-                          target="style"
-                          label="Загрузить свой"
-                        />
-                      </div>
-                    </div>
-                    {cover ? (
-                      <img
-                        className="heroimage"
-                        src={url(cover)}
-                        alt="Утверждённый стиль"
-                      />
-                    ) : (
-                      <div className="frameplaceholder">
-                        ◐<small>Утверждённый стиль появится здесь</small>
-                      </div>
-                    )}
-                  </div>
-                </section>
-                <AssetGrid target="style" />
-              </>
-            )}
-            {(tab === "Персонажи" || tab === "Локации") && (
-              <>
-                {(() => {
-                  const key = tab === "Персонажи" ? "characters" : "locations";
-                  return (
-                    <>
-                      <div className="actions">
-                        <button
-                          onClick={() =>
-                            change({ [key]: [...d![key], newProfile()] })
-                          }
-                        >
-                          + {key === "characters" ? "Персонаж" : "Локация"}
-                        </button>
-                        <span>
-                          Референсы и описание сохраняются для всех связанных
-                          сцен.
-                        </span>
-                      </div>
-                      {d![key].map((r) => {
-                        const edit = (patch: Partial<typeof r>) =>
-                          change({
-                            [key]: d![key].map((v) =>
-                              v.id === r.id
-                                ? {
-                                    ...v,
-                                    ...patch,
-                                    approved:
-                                      "approved" in patch
-                                        ? patch.approved!
-                                        : false,
-                                  }
-                                : v,
-                            ),
-                          });
-                        return (
-                          <section key={r.id}>
-                            <div className="twocol">
-                              <div>
-                                <Field label="Название">
-                                  <input
-                                    value={r.name}
-                                    onChange={(e) =>
-                                      edit({ name: e.target.value })
-                                    }
-                                  />
-                                </Field>
-                                <Field label="Описание">
-                                  <textarea
-                                    value={r.description}
-                                    onChange={(e) =>
-                                      edit({ description: e.target.value })
-                                    }
-                                  />
-                                </Field>
-                                <Field
-                                  label={
-                                    key === "characters"
-                                      ? "Внешность"
-                                      : "Свет и атмосфера"
-                                  }
-                                >
-                                  <textarea
-                                    value={r.appearance}
-                                    onChange={(e) =>
-                                      edit({ appearance: e.target.value })
-                                    }
-                                  />
-                                </Field>
-                                <Field
-                                  label={
-                                    key === "characters"
-                                      ? "Одежда"
-                                      : "Палитра и фактуры"
-                                  }
-                                >
-                                  <input
-                                    value={r.clothing}
-                                    onChange={(e) =>
-                                      edit({ clothing: e.target.value })
-                                    }
-                                  />
-                                </Field>
-                                <Field label="Заметки">
-                                  <input
-                                    value={r.notes}
-                                    onChange={(e) =>
-                                      edit({ notes: e.target.value })
-                                    }
-                                  />
-                                </Field>
-                                {r.variants.map((v, i) => (
-                                  <div className="actions" key={i}>
-                                    <input
-                                      aria-label="Название варианта"
-                                      value={v.name}
-                                      onChange={(e) =>
-                                        edit({
-                                          variants: r.variants.map((a, j) =>
-                                            j === i
-                                              ? { ...a, name: e.target.value }
-                                              : a,
-                                          ),
-                                        })
-                                      }
-                                    />
-                                    <input
-                                      aria-label="Описание варианта"
-                                      value={v.description}
-                                      onChange={(e) =>
-                                        edit({
-                                          variants: r.variants.map((a, j) =>
-                                            j === i
-                                              ? {
-                                                  ...a,
-                                                  description: e.target.value,
-                                                }
-                                              : a,
-                                          ),
-                                        })
-                                      }
-                                    />
-                                  </div>
-                                ))}
-                                <button
-                                  className="ghost"
-                                  onClick={() =>
-                                    edit({
-                                      variants: [
-                                        ...r.variants,
-                                        { name: "Вариант", description: "" },
-                                      ],
-                                    })
-                                  }
-                                >
-                                  + Вариант образа
-                                </button>
-                                <div className="actions">
-                                  <button
-                                    className="secondary"
-                                    onClick={() =>
-                                      edit({ approved: !r.approved })
-                                    }
-                                  >
-                                    {r.approved
-                                      ? "✓ Описание утверждено"
-                                      : "Утвердить описание"}
-                                  </button>
-                                  <button
-                                    className="ghost"
-                                    onClick={() => {
-                                      if (
-                                        confirm(
-                                          "Удалить профиль и убрать его из сцен?",
-                                        )
-                                      )
-                                        change({
-                                          [key]: d![key].filter(
-                                            (v) => v.id !== r.id,
-                                          ),
-                                          scenes: d!.scenes.map((s) => ({
-                                            ...s,
-                                            characterIds: s.characterIds.filter(
-                                              (id) => id !== r.id,
-                                            ),
-                                            locationId:
-                                              s.locationId === r.id
-                                                ? null
-                                                : s.locationId,
-                                            approved: false,
-                                          })),
-                                          storyboardApproved: false,
-                                        });
-                                    }}
-                                  >
-                                    Удалить
-                                  </button>
-                                </div>
-                              </div>
-                              <div>
-                                <div className="actions">
-                                  <button
-                                    disabled={busy}
-                                    onClick={() =>
-                                      run(() => generate("image", [r.id]))
-                                    }
-                                  >
-                                    Создать референс
-                                  </button>
-                                  <Upload
-                                    kind="image"
-                                    target={r.id}
-                                    label="Загрузить"
-                                  />
-                                </div>
-                                <AssetGrid target={r.id} />
-                              </div>
-                            </div>
-                          </section>
-                        );
-                      })}
-                    </>
-                  );
-                })()}
-              </>
-            )}
-            {tab === "Раскадровка" && (
-              <>
-                <div className="toolbar">
+              {stepApproved && !revisionUnlocked ? (
+                <div className="notice">
+                  Этап утверждён.{" "}
                   <button
-                    onClick={() =>
-                      change({
-                        scenes: [
-                          ...d!.scenes,
-                          newScene(d!.scenes.at(-1)?.end || 0),
-                        ],
-                        storyboardApproved: false,
-                      })
-                    }
-                  >
-                    + Сцена
-                  </button>
-                  <button
-                    className="secondary"
-                    onClick={() =>
-                      change({ storyboardApproved: !d!.storyboardApproved })
-                    }
-                  >
-                    {d!.storyboardApproved
-                      ? "✓ План утверждён"
-                      : "Утвердить план"}
-                  </button>
-                  <button
-                    className="ghost"
-                    onClick={() =>
-                      setSelected(
-                        selected.length === d!.scenes.length
-                          ? []
-                          : d!.scenes.map((s) => s.id),
-                      )
-                    }
-                  >
-                    Выбрать все
-                  </button>
-                </div>
-                <section className="batch">
-                  <b>{selected.length} выбрано</b>
-                  <button
-                    disabled={busy || !selected.length}
-                    onClick={() => run(() => generate("image", selected))}
-                  >
-                    Генерировать кадры
-                  </button>
-                  <select
-                    aria-label="Видеопровайдер"
-                    value={videoModel}
-                    onChange={(e) => setVideoModel(e.target.value)}
-                  >
-                    <option value="kling">Kling 3 Standard</option>
-                    <option value="seedance">Seedance 1 Pro</option>
-                  </select>
-                  <input
-                    aria-label="Длительность генерации"
-                    type="number"
-                    min={videoModel === "kling" ? 3 : 2}
-                    max={videoModel === "kling" ? 15 : 12}
-                    value={duration}
-                    onChange={(e) => setDuration(Number(e.target.value))}
-                  />
-                  <span>сек.</span>
-                  <button
-                    disabled={busy || !selected.length}
-                    onClick={() => run(() => generate("video", selected))}
-                  >
-                    Генерировать видео
-                  </button>
-                </section>
-                {d!.scenes.map((s, i) => (
-                  <section
-                    className="scene"
-                    key={s.id}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={() => {
-                      if (!drag || drag === s.id) return;
-                      const list = [...d!.scenes],
-                        from = list.findIndex((v) => v.id === drag),
-                        to = list.findIndex((v) => v.id === s.id);
-                      const [item] = list.splice(from, 1);
-                      list.splice(to, 0, item);
-                      change({ scenes: list, storyboardApproved: false });
-                      setDrag(null);
+                    onClick={() => {
+                      if (
+                        confirm(
+                          "Изменение этого этапа пометит следующие этапы как требующие проверки. Созданные версии медиа сохранятся. Продолжить?",
+                        )
+                      ) {
+                        setRevisionUnlocked(true);
+                        const workflow = { ...d!.workflow };
+                        for (let i = stepIndex; i < 4; i++)
+                          workflow[
+                            ["key", "story", "board", "generation"][
+                              i
+                            ] as keyof typeof workflow
+                          ] = false;
+                        change({ workflow });
+                      }
                     }}
                   >
-                    <div className="sceneNumber">
-                      <span
-                        draggable
-                        onDragStart={() => setDrag(s.id)}
-                        title="Перетащить сцену"
-                      >
-                        ⠿ {String(i + 1).padStart(2, "0")}
-                      </span>
-                      <input
-                        aria-label="Выбрать сцену"
-                        type="checkbox"
-                        checked={selected.includes(s.id)}
-                        onChange={() =>
-                          setSelected((v) =>
-                            v.includes(s.id)
-                              ? v.filter((id) => id !== s.id)
-                              : [...v, s.id],
-                          )
-                        }
-                      />
-                    </div>
-                    <div>
-                      <div className="scenetop">
+                    Изменить этап
+                  </button>
+                </div>
+              ) : (
+                tab !== "Монтаж" && (
+                  <button
+                    className="primary"
+                    disabled={busy || dirty}
+                    onClick={() => run(approveStep)}
+                  >
+                    Утвердить {tab.toLowerCase()} →
+                  </button>
+                )
+              )}
+            </div>
+            {(!stepApproved || revisionUnlocked) && (
+              <>
+                {panel === "История" && (
+                  <div className="twocol">
+                    <section>
+                      <h2>Музыка и замысел</h2>
+                      <Field label="Название">
                         <input
-                          aria-label="Название сцены"
-                          value={s.title}
+                          value={d!.title}
+                          onChange={(e) => change({ title: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="Идея клипа">
+                        <textarea
+                          rows={5}
+                          placeholder="Расскажи историю так, как ты её видишь…"
+                          value={d!.idea}
                           onChange={(e) =>
-                            sceneEdit(s, { title: e.target.value })
+                            change({
+                              idea: e.target.value,
+                              conceptApproved: false,
+                            })
                           }
                         />
-                        <span className="status">
-                          {labels[active.statuses[s.id]] ||
-                            active.statuses[s.id] ||
-                            (s.videoId
-                              ? "Видео выбрано"
-                              : s.imageId
-                                ? "Кадр выбран"
-                                : "Черновик")}
+                      </Field>
+                      <VoiceButton
+                        onText={(text) =>
+                          change({
+                            idea: [d!.idea, text].filter(Boolean).join("\n"),
+                            conceptApproved: false,
+                          })
+                        }
+                      />
+                      <Field label="Текст песни (необязательно)">
+                        <textarea
+                          value={d!.lyrics}
+                          onChange={(e) => change({ lyrics: e.target.value })}
+                        />
+                      </Field>
+                      <Field label="Сценарная концепция">
+                        <textarea
+                          rows={5}
+                          value={d!.concept}
+                          onChange={(e) =>
+                            change({
+                              concept: e.target.value,
+                              conceptApproved: false,
+                            })
+                          }
+                        />
+                      </Field>
+                    </section>
+                    <div>
+                      <section>
+                        <h2>Музыкальный трек</h2>
+                        <p>
+                          MP3 или WAV, до 256 МБ и одного часа. Длительность и
+                          waveform анализируются в фоне.
+                        </p>
+                        <Upload
+                          kind="audio"
+                          target="audio"
+                          label="Загрузить трек"
+                        />
+                        {audio && <audio controls src={url(audio)} />}
+                        <AssetGrid target="audio" />
+                      </section>
+                      <section>
+                        <div className="eyebrow">AI СОАВТОР</div>
+                        <h2>Развить историю</h2>
+                        <p>
+                          Ассистент предложит сценарий и план кадров. Применение
+                          черновика всегда остаётся за тобой.
+                        </p>
+                        <textarea
+                          placeholder="Пожелания или правки к следующему варианту…"
+                          value={feedback}
+                          onChange={(e) => setFeedback(e.target.value)}
+                        />
+                        <button
+                          disabled={busy || (!demo && !config?.screenplay)}
+                          onClick={() =>
+                            run(() => generate("screenplay", ["project"]))
+                          }
+                        >
+                          Предложить сценарий →
+                        </button>
+                        {!demo && !config?.screenplay && (
+                          <small>Провайдер сценария не настроен.</small>
+                        )}
+                      </section>
+                      <section>
+                        <h2>Референсы проекта</h2>
+                        <Upload
+                          kind="image"
+                          target="reference"
+                          label="Изображение"
+                        />
+                        <Upload kind="video" target="reference" label="Видео" />
+                        <AssetGrid target="reference" />
+                      </section>
+                    </div>
+                  </div>
+                )}
+                {panel === "Стиль" && (
+                  <>
+                    <section>
+                      <div className="twocol">
+                        <div>
+                          <h2>Визуальный язык</h2>
+                          <p>
+                            Сначала выбери направление. Этот кадр станет
+                            референсом для персонажей, локаций и сцен.
+                          </p>
+                          <textarea
+                            rows={5}
+                            value={d!.stylePrompt}
+                            placeholder="Свет, палитра, фактура, эпоха, настроение…"
+                            onChange={(e) =>
+                              change({
+                                stylePrompt: e.target.value,
+                                styleId: null,
+                              })
+                            }
+                          />
+                          <VoiceButton
+                            onText={(text) =>
+                              change({
+                                stylePrompt: [d!.stylePrompt, text]
+                                  .filter(Boolean)
+                                  .join("\n"),
+                                styleId: null,
+                              })
+                            }
+                          />
+                          <div className="actions">
+                            <button
+                              disabled={busy}
+                              onClick={() =>
+                                run(() => generate("image", ["style"]))
+                              }
+                            >
+                              Создать вариант
+                            </button>
+                            <Upload
+                              kind="image"
+                              target="style"
+                              label="Загрузить свой"
+                            />
+                          </div>
+                        </div>
+                        {cover ? (
+                          <img
+                            className="heroimage"
+                            src={url(cover)}
+                            alt="Утверждённый стиль"
+                          />
+                        ) : (
+                          <div className="frameplaceholder">
+                            ◐<small>Утверждённый стиль появится здесь</small>
+                          </div>
+                        )}
+                      </div>
+                    </section>
+                    <AssetGrid target="style" />
+                  </>
+                )}
+                {(panel === "Персонажи" || panel === "Локации") && (
+                  <>
+                    {(() => {
+                      const key =
+                        panel === "Персонажи" ? "characters" : "locations";
+                      return (
+                        <>
+                          <div className="actions">
+                            <button
+                              onClick={() =>
+                                change({ [key]: [...d![key], newProfile()] })
+                              }
+                            >
+                              + {key === "characters" ? "Персонаж" : "Локация"}
+                            </button>
+                            <span>
+                              Референсы и описание сохраняются для всех
+                              связанных сцен.
+                            </span>
+                          </div>
+                          {d![key].map((r) => {
+                            const edit = (patch: Partial<typeof r>) =>
+                              change({
+                                [key]: d![key].map((v) =>
+                                  v.id === r.id
+                                    ? {
+                                        ...v,
+                                        ...patch,
+                                        approved:
+                                          "approved" in patch
+                                            ? patch.approved!
+                                            : false,
+                                      }
+                                    : v,
+                                ),
+                              });
+                            return (
+                              <section key={r.id}>
+                                <div className="twocol">
+                                  <div>
+                                    <Field label="Название">
+                                      <input
+                                        value={r.name}
+                                        onChange={(e) =>
+                                          edit({ name: e.target.value })
+                                        }
+                                      />
+                                    </Field>
+                                    <Field label="Описание">
+                                      <textarea
+                                        value={r.description}
+                                        onChange={(e) =>
+                                          edit({ description: e.target.value })
+                                        }
+                                      />
+                                    </Field>
+                                    <Field
+                                      label={
+                                        key === "characters"
+                                          ? "Внешность"
+                                          : "Свет и атмосфера"
+                                      }
+                                    >
+                                      <textarea
+                                        value={r.appearance}
+                                        onChange={(e) =>
+                                          edit({ appearance: e.target.value })
+                                        }
+                                      />
+                                    </Field>
+                                    <Field
+                                      label={
+                                        key === "characters"
+                                          ? "Одежда"
+                                          : "Палитра и фактуры"
+                                      }
+                                    >
+                                      <input
+                                        value={r.clothing}
+                                        onChange={(e) =>
+                                          edit({ clothing: e.target.value })
+                                        }
+                                      />
+                                    </Field>
+                                    <Field label="Заметки">
+                                      <input
+                                        value={r.notes}
+                                        onChange={(e) =>
+                                          edit({ notes: e.target.value })
+                                        }
+                                      />
+                                    </Field>
+                                    {r.variants.map((v, i) => (
+                                      <div className="actions" key={i}>
+                                        <input
+                                          aria-label="Название варианта"
+                                          value={v.name}
+                                          onChange={(e) =>
+                                            edit({
+                                              variants: r.variants.map(
+                                                (a, j) =>
+                                                  j === i
+                                                    ? {
+                                                        ...a,
+                                                        name: e.target.value,
+                                                      }
+                                                    : a,
+                                              ),
+                                            })
+                                          }
+                                        />
+                                        <input
+                                          aria-label="Описание варианта"
+                                          value={v.description}
+                                          onChange={(e) =>
+                                            edit({
+                                              variants: r.variants.map(
+                                                (a, j) =>
+                                                  j === i
+                                                    ? {
+                                                        ...a,
+                                                        description:
+                                                          e.target.value,
+                                                      }
+                                                    : a,
+                                              ),
+                                            })
+                                          }
+                                        />
+                                      </div>
+                                    ))}
+                                    <button
+                                      className="ghost"
+                                      onClick={() =>
+                                        edit({
+                                          variants: [
+                                            ...r.variants,
+                                            {
+                                              name: "Вариант",
+                                              description: "",
+                                            },
+                                          ],
+                                        })
+                                      }
+                                    >
+                                      + Вариант образа
+                                    </button>
+                                    <div className="actions">
+                                      <button
+                                        className="secondary"
+                                        onClick={() =>
+                                          edit({ approved: !r.approved })
+                                        }
+                                      >
+                                        {r.approved
+                                          ? "✓ Описание утверждено"
+                                          : "Утвердить описание"}
+                                      </button>
+                                      <button
+                                        className="ghost"
+                                        onClick={() => {
+                                          if (
+                                            confirm(
+                                              "Удалить профиль и убрать его из сцен?",
+                                            )
+                                          )
+                                            change({
+                                              [key]: d![key].filter(
+                                                (v) => v.id !== r.id,
+                                              ),
+                                              scenes: d!.scenes.map((s) => ({
+                                                ...s,
+                                                characterIds:
+                                                  s.characterIds.filter(
+                                                    (id) => id !== r.id,
+                                                  ),
+                                                locationId:
+                                                  s.locationId === r.id
+                                                    ? null
+                                                    : s.locationId,
+                                                approved: false,
+                                              })),
+                                              storyboardApproved: false,
+                                            });
+                                        }}
+                                      >
+                                        Удалить
+                                      </button>
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <div className="actions">
+                                      <button
+                                        disabled={busy}
+                                        onClick={() =>
+                                          run(() => generate("image", [r.id]))
+                                        }
+                                      >
+                                        Создать референс
+                                      </button>
+                                      <Upload
+                                        kind="image"
+                                        target={r.id}
+                                        label="Загрузить"
+                                      />
+                                    </div>
+                                    <AssetGrid target={r.id} />
+                                  </div>
+                                </div>
+                              </section>
+                            );
+                          })}
+                        </>
+                      );
+                    })()}
+                  </>
+                )}
+                {panel === "Раскадровка" && (
+                  <>
+                    <div className="toolbar">
+                      <button
+                        onClick={() => {
+                          const length = audio?.metadata.duration || 0;
+                          if (!length) {
+                            setError("Сначала загрузи и выбери музыку");
+                            return;
+                          }
+                          if (
+                            d!.scenes.length &&
+                            !confirm(
+                              "Заменить список кадров? Старые медиафайлы останутся в медиатеке.",
+                            )
+                          )
+                            return;
+                          const count = Math.ceil(length / 5);
+                          change({
+                            scenes: Array.from({ length: count }, (_, i) => ({
+                              ...newScene((i * length) / count),
+                              title: `Кадр ${i + 1}`,
+                              end: ((i + 1) * length) / count,
+                              description: d!.concept || d!.idea,
+                              prompt: `${d!.stylePrompt}. ${d!.concept || d!.idea}`,
+                              approved: true,
+                            })),
+                            storyboardApproved: false,
+                          });
+                        }}
+                      >
+                        Предложить разбивку по музыке
+                      </button>
+                      <button
+                        onClick={() =>
+                          change({
+                            scenes: [
+                              ...d!.scenes,
+                              newScene(d!.scenes.at(-1)?.end || 0),
+                            ],
+                            storyboardApproved: false,
+                          })
+                        }
+                      >
+                        + Сцена
+                      </button>
+                      <button
+                        className="ghost"
+                        onClick={() =>
+                          setSelected(
+                            selected.length === d!.scenes.length
+                              ? []
+                              : d!.scenes.map((s) => s.id),
+                          )
+                        }
+                      >
+                        Выбрать все
+                      </button>
+                    </div>
+                    <section className="batch">
+                      <b>{selected.length} выбрано</b>
+                      <button
+                        disabled={busy || !selected.length}
+                        onClick={() => run(() => generate("image", selected))}
+                      >
+                        Генерировать кадры
+                      </button>
+                    </section>
+                    {d!.scenes.map((s, i) => (
+                      <section
+                        className="scene"
+                        key={s.id}
+                        onDragOver={(e) => e.preventDefault()}
+                        onDrop={() => {
+                          if (!drag || drag === s.id) return;
+                          const list = [...d!.scenes],
+                            from = list.findIndex((v) => v.id === drag),
+                            to = list.findIndex((v) => v.id === s.id);
+                          const [item] = list.splice(from, 1);
+                          list.splice(to, 0, item);
+                          change({ scenes: list, storyboardApproved: false });
+                          setDrag(null);
+                        }}
+                      >
+                        <div className="sceneNumber">
+                          <span
+                            draggable
+                            onDragStart={() => setDrag(s.id)}
+                            title="Перетащить сцену"
+                          >
+                            ⠿ {String(i + 1).padStart(2, "0")}
+                          </span>
+                          <input
+                            aria-label="Выбрать сцену"
+                            type="checkbox"
+                            checked={selected.includes(s.id)}
+                            onChange={() =>
+                              setSelected((v) =>
+                                v.includes(s.id)
+                                  ? v.filter((id) => id !== s.id)
+                                  : [...v, s.id],
+                              )
+                            }
+                          />
+                        </div>
+                        <div>
+                          <div className="scenetop">
+                            <input
+                              aria-label="Название сцены"
+                              value={s.title}
+                              onChange={(e) =>
+                                sceneEdit(s, { title: e.target.value })
+                              }
+                            />
+                            <span className="status">
+                              {labels[active.statuses[s.id]] ||
+                                active.statuses[s.id] ||
+                                (s.videoId
+                                  ? "Видео выбрано"
+                                  : s.imageId
+                                    ? "Кадр выбран"
+                                    : "Черновик")}
+                            </span>
+                          </div>
+                          <div className="actions">
+                            <Field label="Начало, сек.">
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.04"
+                                value={s.start}
+                                onChange={(e) =>
+                                  sceneEdit(s, {
+                                    start: Number(e.target.value),
+                                  })
+                                }
+                              />
+                            </Field>
+                            <Field label="Конец, сек.">
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.04"
+                                value={s.end}
+                                onChange={(e) =>
+                                  sceneEdit(s, { end: Number(e.target.value) })
+                                }
+                              />
+                            </Field>
+                            <span>{(s.end - s.start).toFixed(2)} сек.</span>
+                          </div>
+                          <textarea
+                            aria-label="Описание сцены"
+                            placeholder="Что происходит в кадре?"
+                            value={s.description}
+                            onChange={(e) =>
+                              sceneEdit(s, { description: e.target.value })
+                            }
+                          />
+                          <details>
+                            <summary>Режиссура и запросы</summary>
+                            <div className="twocol">
+                              <Field label="Крупность">
+                                <input
+                                  value={s.framing}
+                                  onChange={(e) =>
+                                    sceneEdit(s, { framing: e.target.value })
+                                  }
+                                />
+                              </Field>
+                              <Field label="Движение камеры">
+                                <input
+                                  value={s.movement}
+                                  onChange={(e) =>
+                                    sceneEdit(s, { movement: e.target.value })
+                                  }
+                                />
+                              </Field>
+                            </div>
+                            <Field label="Запрос для изображения">
+                              <textarea
+                                value={s.prompt}
+                                onChange={(e) =>
+                                  sceneEdit(s, { prompt: e.target.value })
+                                }
+                              />
+                            </Field>
+                            <Field label="Запрос для анимации">
+                              <textarea
+                                value={s.videoPrompt}
+                                onChange={(e) =>
+                                  sceneEdit(s, { videoPrompt: e.target.value })
+                                }
+                              />
+                            </Field>
+                            <Field label="Локация">
+                              <select
+                                value={s.locationId || ""}
+                                onChange={(e) =>
+                                  sceneEdit(s, {
+                                    locationId: e.target.value || null,
+                                  })
+                                }
+                              >
+                                <option value="">Без локации</option>
+                                {d!.locations.map((r) => (
+                                  <option key={r.id} value={r.id}>
+                                    {r.name}
+                                  </option>
+                                ))}
+                              </select>
+                            </Field>
+                            <div className="actions">
+                              {d!.characters.map((r) => (
+                                <label className="check" key={r.id}>
+                                  <input
+                                    type="checkbox"
+                                    checked={s.characterIds.includes(r.id)}
+                                    onChange={() =>
+                                      sceneEdit(s, {
+                                        characterIds: s.characterIds.includes(
+                                          r.id,
+                                        )
+                                          ? s.characterIds.filter(
+                                              (id) => id !== r.id,
+                                            )
+                                          : [...s.characterIds, r.id],
+                                      })
+                                    }
+                                  />
+                                  {r.name}
+                                </label>
+                              ))}
+                            </div>
+                          </details>
+                          <div className="actions">
+                            <button
+                              className="secondary"
+                              onClick={() =>
+                                sceneEdit(s, { approved: !s.approved })
+                              }
+                            >
+                              {s.approved
+                                ? "✓ Сцена утверждена"
+                                : "Утвердить сцену"}
+                            </button>
+                            <Upload kind="image" target={s.id} label="Кадр" />
+                            <button
+                              className="ghost"
+                              disabled={s.end - s.start < 1}
+                              onClick={() => {
+                                const middle = (s.start + s.end) / 2;
+                                const copy = {
+                                  ...newScene(middle),
+                                  title: s.title + " · продолжение",
+                                  end: s.end,
+                                  description: s.description,
+                                  prompt: s.prompt,
+                                };
+                                change({
+                                  scenes: d!.scenes.flatMap((v) =>
+                                    v.id === s.id
+                                      ? [
+                                          {
+                                            ...v,
+                                            end: middle,
+                                            approved: false,
+                                          },
+                                          copy,
+                                        ]
+                                      : [v],
+                                  ),
+                                  storyboardApproved: false,
+                                });
+                              }}
+                            >
+                              Разделить
+                            </button>
+                            <button
+                              className="ghost"
+                              disabled={i === 0}
+                              onClick={() => {
+                                const scenes = [...d!.scenes];
+                                [scenes[i - 1], scenes[i]] = [
+                                  scenes[i],
+                                  scenes[i - 1],
+                                ];
+                                change({ scenes, storyboardApproved: false });
+                              }}
+                            >
+                              ↑
+                            </button>
+                            <button
+                              className="ghost"
+                              onClick={() => {
+                                if (
+                                  confirm(
+                                    "Удалить сцену? Медиа останутся в библиотеке.",
+                                  )
+                                )
+                                  change({
+                                    scenes: d!.scenes.filter(
+                                      (v) => v.id !== s.id,
+                                    ),
+                                    storyboardApproved: false,
+                                  });
+                              }}
+                            >
+                              Удалить
+                            </button>
+                          </div>
+                          <AssetGrid target={s.id} />
+                        </div>
+                      </section>
+                    ))}
+                  </>
+                )}
+                {panel === "Таймлайн" && (
+                  <>
+                    <section className="story-preview">
+                      {(() => {
+                        const shot = d!.scenes.find(
+                          (s) => position >= s.start && position < s.end,
+                        );
+                        const image = assets.find(
+                          (a) => a.id === shot?.imageId,
+                        );
+                        return image ? (
+                          <img
+                            src={url(image)}
+                            alt={shot?.title || "Кадр раскадровки"}
+                          />
+                        ) : (
+                          <div className="frameplaceholder">
+                            {shot
+                              ? `Кадр «${shot.title}» ещё не выбран`
+                              : "На этой секунде нет кадра"}
+                          </div>
+                        );
+                      })()}
+                      <p>
+                        {d!.scenes.find(
+                          (s) => position >= s.start && position < s.end,
+                        )?.title || "Раскадровка"}{" "}
+                        · {time(position)}
+                      </p>
+                    </section>
+                    {!audio && (
+                      <section>
+                        <h2>Загрузи музыку</h2>
+                        <Upload
+                          kind="audio"
+                          target="audio"
+                          label="Загрузить MP3 или WAV"
+                        />
+                        <AssetGrid target="audio" />
+                      </section>
+                    )}
+                    <section>
+                      <div className="heading compact">
+                        <h2>Музыка ведёт монтаж</h2>
+                        <span>
+                          {time(position)} /{" "}
+                          {time(audio?.metadata.duration || 0)}
                         </span>
                       </div>
-                      <div className="actions">
-                        <Field label="Начало, сек.">
+                      {audio ? (
+                        <>
+                          <audio
+                            ref={player}
+                            controls
+                            src={url(audio)}
+                            onTimeUpdate={(e) =>
+                              setPosition(e.currentTarget.currentTime)
+                            }
+                          />
+                          <div
+                            className="waveform"
+                            role="slider"
+                            aria-label="Позиция аудио"
+                            aria-valuemin={0}
+                            aria-valuemax={audio.metadata.duration || 0}
+                            aria-valuenow={position}
+                            tabIndex={0}
+                            onKeyDown={(e) => {
+                              if (
+                                player.current &&
+                                ["ArrowLeft", "ArrowRight"].includes(e.key)
+                              )
+                                player.current.currentTime = Math.max(
+                                  0,
+                                  Math.min(
+                                    audio.metadata.duration || 0,
+                                    position +
+                                      (e.key === "ArrowRight" ? 1 : -1),
+                                  ),
+                                );
+                            }}
+                            onClick={(e) => {
+                              const bounds =
+                                e.currentTarget.getBoundingClientRect();
+                              if (player.current)
+                                player.current.currentTime =
+                                  ((e.clientX - bounds.left) / bounds.width) *
+                                  (audio.metadata.duration || 0);
+                            }}
+                          >
+                            {(audio.metadata.waveform || []).map((v, i) => (
+                              <i
+                                key={i}
+                                style={{ height: `${Math.max(3, v * 100)}%` }}
+                              />
+                            ))}
+                            <b
+                              className="playhead"
+                              style={{
+                                left: `${(position / (audio.metadata.duration || 1)) * 100}%`,
+                              }}
+                            />
+                            {d!.beats.map((b, i) => (
+                              <span
+                                key={i}
+                                className="beat"
+                                style={{
+                                  left: `${(b / (audio.metadata.duration || 1)) * 100}%`,
+                                }}
+                              />
+                            ))}
+                          </div>
+                          <div className="timelinebar">
+                            {d!.scenes.map((s, i) => (
+                              <button
+                                key={s.id}
+                                style={{
+                                  left: `${(s.start / (audio.metadata.duration || 1)) * 100}%`,
+                                  width: `${((s.end - s.start) / (audio.metadata.duration || 1)) * 100}%`,
+                                }}
+                                onClick={() => {
+                                  if (player.current)
+                                    player.current.currentTime = s.start;
+                                }}
+                              >
+                                {i + 1} · {s.title}
+                              </button>
+                            ))}
+                          </div>
+                          <small>
+                            {demo
+                              ? "Демонстрационный waveform. В рабочем режиме строится по загруженному аудио."
+                              : "Waveform построен по аудио."}{" "}
+                            Биты и музыкальные секции отмечаются вручную.
+                          </small>
+                          <div className="actions">
+                            <button
+                              className="secondary"
+                              onClick={() =>
+                                change({
+                                  beats: [
+                                    ...d!.beats,
+                                    Math.round(position * 100) / 100,
+                                  ].sort((a, b) => a - b),
+                                })
+                              }
+                            >
+                              + Бит в {time(position)}
+                            </button>
+                            <button
+                              className="ghost"
+                              onClick={() => change({ beats: [] })}
+                            >
+                              Очистить биты
+                            </button>
+                          </div>
+                          <div className="beatlist">
+                            {d!.beats.map((b, i) => (
+                              <button
+                                className="pill"
+                                key={i}
+                                onClick={() =>
+                                  change({
+                                    beats: d!.beats.filter((_, j) => j !== i),
+                                  })
+                                }
+                              >
+                                {time(b)} ×
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      ) : (
+                        <p>Выбери утверждённый трек на вкладке «История».</p>
+                      )}
+                    </section>
+                    <section>
+                      <h2>Музыкальные секции</h2>
+                      {d!.sections.map((s, i) => (
+                        <div className="sectionrow" key={i}>
                           <input
+                            aria-label="Название секции"
+                            value={s.name}
+                            onChange={(e) =>
+                              change({
+                                sections: d!.sections.map((v, j) =>
+                                  j === i ? { ...v, name: e.target.value } : v,
+                                ),
+                              })
+                            }
+                          />
+                          <input
+                            aria-label="Начало секции"
                             type="number"
-                            min="0"
+                            value={s.start}
+                            onChange={(e) =>
+                              change({
+                                sections: d!.sections.map((v, j) =>
+                                  j === i
+                                    ? { ...v, start: Number(e.target.value) }
+                                    : v,
+                                ),
+                              })
+                            }
+                          />
+                          <input
+                            aria-label="Конец секции"
+                            type="number"
+                            value={s.end}
+                            onChange={(e) =>
+                              change({
+                                sections: d!.sections.map((v, j) =>
+                                  j === i
+                                    ? { ...v, end: Number(e.target.value) }
+                                    : v,
+                                ),
+                              })
+                            }
+                          />
+                          <button
+                            className="ghost"
+                            onClick={() =>
+                              change({
+                                sections: d!.sections.filter((_, j) => j !== i),
+                              })
+                            }
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                      <button
+                        className="secondary"
+                        onClick={() =>
+                          change({
+                            sections: [
+                              ...d!.sections,
+                              {
+                                name: "Припев",
+                                start: position,
+                                end: position + 5,
+                              },
+                            ],
+                          })
+                        }
+                      >
+                        + Секция
+                      </button>
+                    </section>
+                    <section>
+                      <h2>Границы сцен</h2>
+                      {d!.scenes.map((s) => (
+                        <div className="sectionrow" key={s.id}>
+                          <b>{s.title}</b>
+                          <input
+                            aria-label="Начало сцены"
+                            type="number"
                             step="0.04"
                             value={s.start}
                             onChange={(e) =>
                               sceneEdit(s, { start: Number(e.target.value) })
                             }
                           />
-                        </Field>
-                        <Field label="Конец, сек.">
                           <input
+                            aria-label="Конец сцены"
                             type="number"
-                            min="0"
                             step="0.04"
                             value={s.end}
                             onChange={(e) =>
                               sceneEdit(s, { end: Number(e.target.value) })
                             }
                           />
-                        </Field>
-                        <span>{(s.end - s.start).toFixed(2)} сек.</span>
-                      </div>
-                      <textarea
-                        aria-label="Описание сцены"
-                        placeholder="Что происходит в кадре?"
-                        value={s.description}
-                        onChange={(e) =>
-                          sceneEdit(s, { description: e.target.value })
-                        }
-                      />
-                      <details>
-                        <summary>Режиссура и запросы</summary>
-                        <div className="twocol">
-                          <Field label="Крупность">
-                            <input
-                              value={s.framing}
-                              onChange={(e) =>
-                                sceneEdit(s, { framing: e.target.value })
-                              }
-                            />
-                          </Field>
-                          <Field label="Движение камеры">
-                            <input
-                              value={s.movement}
-                              onChange={(e) =>
-                                sceneEdit(s, { movement: e.target.value })
-                              }
-                            />
-                          </Field>
+                          <span>{time(s.end - s.start)}</span>
                         </div>
-                        <Field label="Запрос для изображения">
-                          <textarea
-                            value={s.prompt}
-                            onChange={(e) =>
-                              sceneEdit(s, { prompt: e.target.value })
-                            }
-                          />
-                        </Field>
-                        <Field label="Запрос для анимации">
-                          <textarea
-                            value={s.videoPrompt}
-                            onChange={(e) =>
-                              sceneEdit(s, { videoPrompt: e.target.value })
-                            }
-                          />
-                        </Field>
-                        <Field label="Локация">
-                          <select
-                            value={s.locationId || ""}
-                            onChange={(e) =>
-                              sceneEdit(s, {
-                                locationId: e.target.value || null,
-                              })
-                            }
-                          >
-                            <option value="">Без локации</option>
-                            {d!.locations.map((r) => (
-                              <option key={r.id} value={r.id}>
-                                {r.name}
-                              </option>
-                            ))}
-                          </select>
-                        </Field>
-                        <div className="actions">
-                          {d!.characters.map((r) => (
-                            <label className="check" key={r.id}>
-                              <input
-                                type="checkbox"
-                                checked={s.characterIds.includes(r.id)}
-                                onChange={() =>
-                                  sceneEdit(s, {
-                                    characterIds: s.characterIds.includes(r.id)
-                                      ? s.characterIds.filter(
-                                          (id) => id !== r.id,
-                                        )
-                                      : [...s.characterIds, r.id],
-                                  })
-                                }
-                              />
-                              {r.name}
-                            </label>
-                          ))}
-                        </div>
-                      </details>
-                      <div className="actions">
-                        <button
-                          className="secondary"
-                          onClick={() =>
-                            sceneEdit(s, { approved: !s.approved })
-                          }
-                        >
-                          {s.approved
-                            ? "✓ Сцена утверждена"
-                            : "Утвердить сцену"}
-                        </button>
-                        <Upload kind="image" target={s.id} label="Кадр" />
-                        <Upload kind="video" target={s.id} label="Видео" />
-                        <button
-                          className="ghost"
-                          disabled={i === 0}
-                          onClick={() => {
-                            const scenes = [...d!.scenes];
-                            [scenes[i - 1], scenes[i]] = [
-                              scenes[i],
-                              scenes[i - 1],
-                            ];
-                            change({ scenes, storyboardApproved: false });
-                          }}
-                        >
-                          ↑
-                        </button>
-                        <button
-                          className="ghost"
-                          onClick={() => {
-                            if (
-                              confirm(
-                                "Удалить сцену? Медиа останутся в библиотеке.",
-                              )
-                            )
-                              change({
-                                scenes: d!.scenes.filter((v) => v.id !== s.id),
-                                storyboardApproved: false,
-                              });
-                          }}
-                        >
-                          Удалить
-                        </button>
-                      </div>
-                      <AssetGrid target={s.id} />
-                    </div>
-                  </section>
-                ))}
-              </>
-            )}
-            {tab === "Таймлайн" && (
-              <>
-                <section>
-                  <div className="heading compact">
-                    <h2>Музыка ведёт монтаж</h2>
-                    <span>
-                      {time(position)} / {time(audio?.metadata.duration || 0)}
-                    </span>
-                  </div>
-                  {audio ? (
-                    <>
-                      <audio
-                        ref={player}
-                        controls
-                        src={url(audio)}
-                        onTimeUpdate={(e) =>
-                          setPosition(e.currentTarget.currentTime)
-                        }
-                      />
-                      <div
-                        className="waveform"
-                        role="slider"
-                        aria-label="Позиция аудио"
-                        aria-valuemin={0}
-                        aria-valuemax={audio.metadata.duration || 0}
-                        aria-valuenow={position}
-                        tabIndex={0}
-                        onKeyDown={(e) => {
-                          if (
-                            player.current &&
-                            ["ArrowLeft", "ArrowRight"].includes(e.key)
-                          )
-                            player.current.currentTime = Math.max(
-                              0,
-                              Math.min(
-                                audio.metadata.duration || 0,
-                                position + (e.key === "ArrowRight" ? 1 : -1),
-                              ),
-                            );
-                        }}
-                        onClick={(e) => {
-                          const bounds =
-                            e.currentTarget.getBoundingClientRect();
-                          if (player.current)
-                            player.current.currentTime =
-                              ((e.clientX - bounds.left) / bounds.width) *
-                              (audio.metadata.duration || 0);
-                        }}
+                      ))}
+                    </section>
+                  </>
+                )}
+                {panel === "Генерация" && (
+                  <>
+                    <section>
+                      <h2>Анимировать раскадровку</h2>
+                      <p>
+                        Выбери провайдера и длительность, затем отправь все
+                        кадры на генерацию. Стоимость показывается до
+                        подтверждения.
+                      </p>
+                      <select
+                        aria-label="Видеопровайдер"
+                        value={videoModel}
+                        onChange={(e) => setVideoModel(e.target.value)}
                       >
-                        {(audio.metadata.waveform || []).map((v, i) => (
-                          <i
-                            key={i}
-                            style={{ height: `${Math.max(3, v * 100)}%` }}
-                          />
-                        ))}
-                        <b
-                          className="playhead"
-                          style={{
-                            left: `${(position / (audio.metadata.duration || 1)) * 100}%`,
-                          }}
-                        />
-                        {d!.beats.map((b, i) => (
-                          <span
-                            key={i}
-                            className="beat"
-                            style={{
-                              left: `${(b / (audio.metadata.duration || 1)) * 100}%`,
-                            }}
-                          />
-                        ))}
-                      </div>
-                      <div className="timelinebar">
-                        {d!.scenes.map((s, i) => (
-                          <button
-                            key={s.id}
-                            style={{
-                              left: `${(s.start / (audio.metadata.duration || 1)) * 100}%`,
-                              width: `${((s.end - s.start) / (audio.metadata.duration || 1)) * 100}%`,
-                            }}
-                            onClick={() => {
-                              if (player.current)
-                                player.current.currentTime = s.start;
-                            }}
-                          >
-                            {i + 1} · {s.title}
-                          </button>
-                        ))}
-                      </div>
-                      <small>
-                        {demo
-                          ? "Демонстрационный waveform. В рабочем режиме строится по загруженному аудио."
-                          : "Waveform построен по аудио."}{" "}
-                        Биты и музыкальные секции отмечаются вручную.
-                      </small>
-                      <div className="actions">
-                        <button
-                          className="secondary"
-                          onClick={() =>
-                            change({
-                              beats: [
-                                ...d!.beats,
-                                Math.round(position * 100) / 100,
-                              ].sort((a, b) => a - b),
-                            })
-                          }
-                        >
-                          + Бит в {time(position)}
-                        </button>
-                        <button
-                          className="ghost"
-                          onClick={() => change({ beats: [] })}
-                        >
-                          Очистить биты
-                        </button>
-                      </div>
-                      <div className="beatlist">
-                        {d!.beats.map((b, i) => (
-                          <button
-                            className="pill"
-                            key={i}
-                            onClick={() =>
-                              change({
-                                beats: d!.beats.filter((_, j) => j !== i),
-                              })
-                            }
-                          >
-                            {time(b)} ×
-                          </button>
-                        ))}
-                      </div>
-                    </>
-                  ) : (
-                    <p>Выбери утверждённый трек на вкладке «История».</p>
-                  )}
-                </section>
-                <section>
-                  <h2>Музыкальные секции</h2>
-                  {d!.sections.map((s, i) => (
-                    <div className="sectionrow" key={i}>
+                        <option value="kling">Kling 3 Standard</option>
+                        <option value="seedance">Seedance 1 Pro</option>
+                      </select>
                       <input
-                        aria-label="Название секции"
-                        value={s.name}
-                        onChange={(e) =>
-                          change({
-                            sections: d!.sections.map((v, j) =>
-                              j === i ? { ...v, name: e.target.value } : v,
-                            ),
-                          })
-                        }
-                      />
-                      <input
-                        aria-label="Начало секции"
+                        aria-label="Длительность видео"
                         type="number"
-                        value={s.start}
-                        onChange={(e) =>
-                          change({
-                            sections: d!.sections.map((v, j) =>
-                              j === i
-                                ? { ...v, start: Number(e.target.value) }
-                                : v,
-                            ),
-                          })
-                        }
-                      />
-                      <input
-                        aria-label="Конец секции"
-                        type="number"
-                        value={s.end}
-                        onChange={(e) =>
-                          change({
-                            sections: d!.sections.map((v, j) =>
-                              j === i
-                                ? { ...v, end: Number(e.target.value) }
-                                : v,
-                            ),
-                          })
-                        }
+                        min={videoModel === "kling" ? 3 : 2}
+                        max={videoModel === "kling" ? 15 : 12}
+                        value={duration}
+                        onChange={(e) => setDuration(Number(e.target.value))}
                       />
                       <button
-                        className="ghost"
+                        disabled={busy}
                         onClick={() =>
-                          change({
-                            sections: d!.sections.filter((_, j) => j !== i),
-                          })
+                          run(() =>
+                            generate(
+                              "video",
+                              d!.scenes
+                                .filter((s) => s.imageId && !s.videoId)
+                                .map((s) => s.id),
+                            ),
+                          )
                         }
                       >
-                        ×
+                        Сгенерировать все видео
                       </button>
+                    </section>
+                    <div className="generation-grid">
+                      {d!.scenes.map((s, i) => {
+                        const image = assets.find((a) => a.id === s.imageId),
+                          video = assets.find((a) => a.id === s.videoId);
+                        return (
+                          <section key={s.id}>
+                            <h3>
+                              {i + 1}. {s.title}
+                            </h3>
+                            <small>
+                              {time(s.start)}–{time(s.end)}
+                            </small>
+                            {image && (
+                              <img
+                                src={url(image)}
+                                alt={`Исходный кадр ${i + 1}`}
+                              />
+                            )}{" "}
+                            {video ? (
+                              <video controls src={url(video)} />
+                            ) : (
+                              <p>Видео ожидается</p>
+                            )}
+                            <AssetGrid target={s.id} />
+                            <textarea
+                              aria-label={`Пожелание к сцене ${i + 1}`}
+                              placeholder="Опиши, что изменить в движении"
+                              value={feedback}
+                              onChange={(e) => setFeedback(e.target.value)}
+                            />
+                            <VoiceButton
+                              onText={(text) =>
+                                setFeedback(
+                                  [feedback, text].filter(Boolean).join("\n"),
+                                )
+                              }
+                            />
+                            <button
+                              disabled={busy || !s.imageId}
+                              onClick={() =>
+                                run(() => generate("video", [s.id]))
+                              }
+                            >
+                              Создать новую версию
+                            </button>
+                          </section>
+                        );
+                      })}
                     </div>
-                  ))}
-                  <button
-                    className="secondary"
-                    onClick={() =>
-                      change({
-                        sections: [
-                          ...d!.sections,
-                          {
-                            name: "Припев",
-                            start: position,
-                            end: position + 5,
-                          },
-                        ],
-                      })
-                    }
-                  >
-                    + Секция
-                  </button>
-                </section>
-                <section>
-                  <h2>Границы сцен</h2>
-                  {d!.scenes.map((s) => (
-                    <div className="sectionrow" key={s.id}>
-                      <b>{s.title}</b>
-                      <input
-                        aria-label="Начало сцены"
-                        type="number"
-                        step="0.04"
-                        value={s.start}
-                        onChange={(e) =>
-                          sceneEdit(s, { start: Number(e.target.value) })
-                        }
-                      />
-                      <input
-                        aria-label="Конец сцены"
-                        type="number"
-                        step="0.04"
-                        value={s.end}
-                        onChange={(e) =>
-                          sceneEdit(s, { end: Number(e.target.value) })
-                        }
-                      />
-                      <span>{time(s.end - s.start)}</span>
+                  </>
+                )}
+                {panel === "Медиатека" && (
+                  <>
+                    <p>
+                      Все загрузки и генерации, включая отклонённые версии.
+                      Смена финального кадра не удаляет предыдущие варианты.
+                    </p>
+                    <AssetGrid />
+                  </>
+                )}
+                {panel === "Очередь" && (
+                  <>
+                    <div className="stats">
+                      <section>
+                        <small>ОЦЕНКА / ПОДТВЕРЖДЁННЫЕ РАСХОДЫ</small>
+                        <h2>
+                          ${total.toFixed(2)}
+                          {unknown ? " + неизвестная стоимость" : ""}
+                        </h2>
+                        <p>
+                          Оценки задаются в конфигурации. Это не выписка
+                          провайдера.
+                        </p>
+                      </section>
+                      <section>
+                        <small>ЛИМИТ ПРОЕКТА</small>
+                        <h2>
+                          {d!.budget === null
+                            ? "Не установлен"
+                            : `$${d!.budget}`}
+                        </h2>
+                        <p>
+                          При лимите генерация без известной оценки блокируется.
+                        </p>
+                      </section>
                     </div>
-                  ))}
-                </section>
-              </>
-            )}
-            {tab === "Медиатека" && (
-              <>
-                <p>
-                  Все загрузки и генерации, включая отклонённые версии. Смена
-                  финального кадра не удаляет предыдущие варианты.
-                </p>
-                <AssetGrid />
-              </>
-            )}
-            {tab === "Очередь" && (
-              <>
-                <div className="stats">
+                    {active.jobs.length === 0 && (
+                      <section className="empty">
+                        Очередь пуста. Ты управляешь моментом запуска каждой
+                        генерации.
+                      </section>
+                    )}
+                    {active.jobs.map((j) => (
+                      <section key={j.id}>
+                        <div className="jobtitle">
+                          <b>
+                            {j.kind} ·{" "}
+                            {j.provider === "demo"
+                              ? "DEMO"
+                              : j.model || "Медиаобработка"}
+                          </b>
+                          <span className={"status " + j.state}>
+                            {labels[j.state] || j.state}
+                          </span>
+                        </div>
+                        <small>
+                          {new Date(j.created_at).toLocaleString("ru")} ·
+                          проверок/попыток: {j.attempts} ·{" "}
+                          {j.estimated === null
+                            ? "Стоимость недоступна"
+                            : `Оценка $${Number(j.estimated).toFixed(2)}`}
+                        </small>
+                        {j.error && <p className="error">{j.error}</p>}
+                        {j.prompt && (
+                          <details>
+                            <summary>Исходный запрос</summary>
+                            <p>{j.prompt}</p>
+                          </details>
+                        )}
+                        {j.result?.draft && (
+                          <>
+                            <p>{j.result.draft.concept}</p>
+                            <button
+                              disabled={busy}
+                              onClick={() =>
+                                run(async () => {
+                                  requireSaved();
+                                  if (
+                                    confirm(
+                                      "Применить черновик? Текущая раскадровка будет заменена; история и медиа сохранятся.",
+                                    )
+                                  ) {
+                                    await api(
+                                      "jobs/" + j.id + "/apply-draft",
+                                      "POST",
+                                      { revision: active.revision },
+                                    );
+                                    await refresh();
+                                    setTab("Сюжет");
+                                    setPanel("История");
+                                  }
+                                })
+                              }
+                            >
+                              Применить черновик
+                            </button>
+                          </>
+                        )}
+                        <div className="actions">
+                          {j.state === "queued" && (
+                            <button
+                              className="secondary"
+                              disabled={busy}
+                              onClick={() =>
+                                run(async () => {
+                                  await api("jobs/" + j.id + "/cancel", "POST");
+                                  await refresh();
+                                })
+                              }
+                            >
+                              Отменить
+                            </button>
+                          )}
+                          {j.state === "failed" && (
+                            <button
+                              className="secondary"
+                              disabled={busy}
+                              onClick={() =>
+                                run(async () => {
+                                  await api("jobs/" + j.id + "/retry", "POST");
+                                  await refresh();
+                                })
+                              }
+                            >
+                              Повторить получение / обработку
+                            </button>
+                          )}
+                          {j.state === "uncertain" && j.provider === "fal" && (
+                            <button
+                              className="secondary"
+                              disabled={busy}
+                              onClick={() =>
+                                run(async () => {
+                                  const requestId = prompt(
+                                    "Request ID из истории fal.ai для этого запроса",
+                                  );
+                                  if (requestId) {
+                                    await api(
+                                      "jobs/" + j.id + "/reconcile",
+                                      "POST",
+                                      { requestId },
+                                    );
+                                    await refresh();
+                                  }
+                                })
+                              }
+                            >
+                              Сверить с провайдером
+                            </button>
+                          )}
+                        </div>
+                      </section>
+                    ))}
+                  </>
+                )}
+                {panel === "Экспорт" && (
                   <section>
-                    <small>ОЦЕНКА / ПОДТВЕРЖДЁННЫЕ РАСХОДЫ</small>
-                    <h2>
-                      ${total.toFixed(2)}
-                      {unknown ? " + неизвестная стоимость" : ""}
-                    </h2>
+                    <div className="eyebrow">THE FINAL HANDOFF</div>
+                    <h2>Твоя история. В Premiere.</h2>
                     <p>
-                      Оценки задаются в конфигурации. Это не выписка провайдера.
+                      Пакет включает выбранные видео по сценам, исходный трек,
+                      WAV для монтажа, FCP 7 XML и манифест. Кадры приводятся к
+                      частоте и разрешению проекта в фоновом обработчике.
                     </p>
-                  </section>
-                  <section>
-                    <small>ЛИМИТ ПРОЕКТА</small>
-                    <h2>
-                      {d!.budget === null ? "Не установлен" : `$${d!.budget}`}
-                    </h2>
+                    <Field label="Если ролик короче сцены">
+                      <select
+                        value={shortPolicy}
+                        onChange={(e) => setShortPolicy(e.target.value)}
+                      >
+                        <option value="reject">
+                          Остановить экспорт и показать ошибку
+                        </option>
+                        <option value="freeze">
+                          Продлить последним кадром
+                        </option>
+                      </select>
+                    </Field>
                     <p>
-                      При лимите генерация без известной оценки блокируется.
+                      Длинные ролики обрезаются; промежутки остаются пустыми.
+                      Пересечения сцен блокируют экспорт.
                     </p>
-                  </section>
-                </div>
-                {active.jobs.length === 0 && (
-                  <section className="empty">
-                    Очередь пуста. Ты управляешь моментом запуска каждой
-                    генерации.
+                    <button
+                      disabled={busy}
+                      onClick={() => run(() => generate("export", ["project"]))}
+                    >
+                      Скачать проект для Premiere
+                    </button>
+                    <div className="notice">
+                      Распакуй ZIP, запусти Relink.ps1 внутри папки и импортируй
+                      timeline-local.xml через File → Import. Импорт в
+                      установленной у тебя версии Premiere ещё требует проверки.
+                    </div>
+                    {assets
+                      .filter((a) => a.kind === "export")
+                      .map((a) => (
+                        <p key={a.id}>
+                          <a className="download" href={url(a)} download>
+                            ↓ {a.name} ·{" "}
+                            {new Date(a.created_at).toLocaleString("ru")}
+                          </a>
+                        </p>
+                      ))}
                   </section>
                 )}
-                {active.jobs.map((j) => (
-                  <section key={j.id}>
-                    <div className="jobtitle">
-                      <b>
-                        {j.kind} ·{" "}
-                        {j.provider === "demo"
-                          ? "DEMO"
-                          : j.model || "Медиаобработка"}
-                      </b>
-                      <span className={"status " + j.state}>
-                        {labels[j.state] || j.state}
-                      </span>
-                    </div>
-                    <small>
-                      {new Date(j.created_at).toLocaleString("ru")} ·
-                      проверок/попыток: {j.attempts} ·{" "}
-                      {j.estimated === null
-                        ? "Стоимость недоступна"
-                        : `Оценка $${Number(j.estimated).toFixed(2)}`}
-                    </small>
-                    {j.error && <p className="error">{j.error}</p>}
-                    {j.prompt && (
-                      <details>
-                        <summary>Исходный запрос</summary>
-                        <p>{j.prompt}</p>
-                      </details>
-                    )}
-                    {j.result?.draft && (
-                      <>
-                        <p>{j.result.draft.concept}</p>
-                        <button
-                          disabled={busy}
-                          onClick={() =>
-                            run(async () => {
-                              requireSaved();
-                              if (
-                                confirm(
-                                  "Применить черновик? Текущая раскадровка будет заменена; история и медиа сохранятся.",
-                                )
-                              ) {
-                                await api(
-                                  "jobs/" + j.id + "/apply-draft",
-                                  "POST",
-                                  { revision: active.revision },
-                                );
-                                await refresh();
-                                setTab("История");
-                              }
-                            })
+                {panel === "Настройки" && (
+                  <div className="twocol">
+                    <section>
+                      <h2>Формат производства</h2>
+                      <Field label="Соотношение сторон">
+                        <select
+                          value={d!.ratio}
+                          onChange={(e) => change({ ratio: e.target.value })}
+                        >
+                          {["16:9", "9:16", "1:1"].map((v) => (
+                            <option key={v}>{v}</option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field label="Разрешение экспорта">
+                        <select
+                          value={d!.resolution}
+                          onChange={(e) =>
+                            change({ resolution: e.target.value })
                           }
                         >
-                          Применить черновик
-                        </button>
-                      </>
-                    )}
-                    <div className="actions">
-                      {j.state === "queued" && (
-                        <button
-                          className="secondary"
-                          disabled={busy}
-                          onClick={() =>
-                            run(async () => {
-                              await api("jobs/" + j.id + "/cancel", "POST");
-                              await refresh();
-                            })
+                          <option>720p</option>
+                          <option>1080p</option>
+                        </select>
+                      </Field>
+                      <Field label="Частота кадров">
+                        <select
+                          value={d!.fps}
+                          onChange={(e) =>
+                            change({ fps: Number(e.target.value) })
                           }
                         >
-                          Отменить
-                        </button>
-                      )}
-                      {j.state === "failed" && (
-                        <button
-                          className="secondary"
-                          disabled={busy}
-                          onClick={() =>
-                            run(async () => {
-                              await api("jobs/" + j.id + "/retry", "POST");
-                              await refresh();
+                          {[24, 25, 30].map((v) => (
+                            <option key={v}>{v}</option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field label="Лимит расходов, USD (пусто — без лимита)">
+                        <input
+                          type="number"
+                          min="0.01"
+                          step="0.01"
+                          value={d!.budget ?? ""}
+                          onChange={(e) =>
+                            change({
+                              budget: e.target.value
+                                ? Number(e.target.value)
+                                : null,
                             })
                           }
-                        >
-                          Повторить получение / обработку
-                        </button>
-                      )}
-                      {j.state === "uncertain" && j.provider === "fal" && (
-                        <button
-                          className="secondary"
-                          disabled={busy}
-                          onClick={() =>
-                            run(async () => {
-                              const requestId = prompt(
-                                "Request ID из истории fal.ai для этого запроса",
-                              );
-                              if (requestId) {
-                                await api(
-                                  "jobs/" + j.id + "/reconcile",
-                                  "POST",
-                                  { requestId },
-                                );
-                                await refresh();
-                              }
-                            })
-                          }
-                        >
-                          Сверить с провайдером
-                        </button>
-                      )}
-                    </div>
-                  </section>
-                ))}
+                        />
+                      </Field>
+                      <button
+                        className="secondary"
+                        onClick={() => change({ archived: !d!.archived })}
+                      >
+                        {d!.archived ? "Вернуть из архива" : "Архивировать"}
+                      </button>
+                    </section>
+                    <section>
+                      <h2>Подключения</h2>
+                      <div className="connection">
+                        <b>Хранилище</b>
+                        <span>{config?.storage}</span>
+                      </div>
+                      <div className="connection">
+                        <b>FLUX / Kling / Seedance</b>
+                        <span>
+                          {config?.fal
+                            ? "Ключ настроен · доступ не проверен"
+                            : "Нужен FAL_KEY"}
+                        </span>
+                      </div>
+                      <div className="connection">
+                        <b>AI-сценарист</b>
+                        <span>
+                          {config?.screenplay
+                            ? "Ключ и модель настроены"
+                            : "Нужны OPENAI_API_KEY и OPENAI_MODEL"}
+                        </span>
+                      </div>
+                      <p>
+                        Ключи задаются на сервере. Статус конфигурации не
+                        означает, что баланс и доступ к каждой модели проверены.
+                      </p>
+                    </section>
+                  </div>
+                )}
               </>
             )}
-            {tab === "Экспорт" && (
-              <section>
-                <div className="eyebrow">THE FINAL HANDOFF</div>
-                <h2>Твоя история. В Premiere.</h2>
+            {stepApproved && !revisionUnlocked && (
+              <section className="approved-summary">
+                <h2>{tab} утверждён</h2>
                 <p>
-                  Пакет включает выбранные видео по сценам, исходный трек, WAV
-                  для монтажа, FCP 7 XML и манифест. Кадры приводятся к частоте
-                  и разрешению проекта в фоновом обработчике.
+                  Чтобы изменить этот этап, нажми «Изменить этап». Созданные
+                  версии сохранятся.
                 </p>
-                <Field label="Если ролик короче сцены">
-                  <select
-                    value={shortPolicy}
-                    onChange={(e) => setShortPolicy(e.target.value)}
-                  >
-                    <option value="reject">
-                      Остановить экспорт и показать ошибку
-                    </option>
-                    <option value="freeze">Продлить последним кадром</option>
-                  </select>
-                </Field>
-                <p>
-                  Длинные ролики обрезаются; промежутки остаются пустыми.
-                  Пересечения сцен блокируют экспорт.
-                </p>
-                <button
-                  disabled={busy}
-                  onClick={() => run(() => generate("export", ["project"]))}
-                >
-                  Собрать пакет для Premiere →
-                </button>
-                <div className="notice">
-                  Распакуй ZIP, запусти Relink.ps1 внутри папки и импортируй
-                  timeline-local.xml через File → Import. Импорт в установленной
-                  у тебя версии Premiere ещё требует проверки.
-                </div>
-                {assets
-                  .filter((a) => a.kind === "export")
-                  .map((a) => (
-                    <p key={a.id}>
-                      <a className="download" href={url(a)} download>
-                        ↓ {a.name} ·{" "}
-                        {new Date(a.created_at).toLocaleString("ru")}
-                      </a>
-                    </p>
-                  ))}
+                {tab === "Ключ" && cover && (
+                  <img
+                    className="heroimage"
+                    src={url(cover)}
+                    alt="Утверждённый ключ"
+                  />
+                )}
+                {tab === "Сюжет" && <p>{d!.concept || d!.idea}</p>}
               </section>
-            )}
-            {tab === "Настройки" && (
-              <div className="twocol">
-                <section>
-                  <h2>Формат производства</h2>
-                  <Field label="Соотношение сторон">
-                    <select
-                      value={d!.ratio}
-                      onChange={(e) => change({ ratio: e.target.value })}
-                    >
-                      {["16:9", "9:16", "1:1"].map((v) => (
-                        <option key={v}>{v}</option>
-                      ))}
-                    </select>
-                  </Field>
-                  <Field label="Разрешение экспорта">
-                    <select
-                      value={d!.resolution}
-                      onChange={(e) => change({ resolution: e.target.value })}
-                    >
-                      <option>720p</option>
-                      <option>1080p</option>
-                    </select>
-                  </Field>
-                  <Field label="Частота кадров">
-                    <select
-                      value={d!.fps}
-                      onChange={(e) => change({ fps: Number(e.target.value) })}
-                    >
-                      {[24, 25, 30].map((v) => (
-                        <option key={v}>{v}</option>
-                      ))}
-                    </select>
-                  </Field>
-                  <Field label="Лимит расходов, USD (пусто — без лимита)">
-                    <input
-                      type="number"
-                      min="0.01"
-                      step="0.01"
-                      value={d!.budget ?? ""}
-                      onChange={(e) =>
-                        change({
-                          budget: e.target.value
-                            ? Number(e.target.value)
-                            : null,
-                        })
-                      }
-                    />
-                  </Field>
-                  <button
-                    className="secondary"
-                    onClick={() => change({ archived: !d!.archived })}
-                  >
-                    {d!.archived ? "Вернуть из архива" : "Архивировать"}
-                  </button>
-                </section>
-                <section>
-                  <h2>Подключения</h2>
-                  <div className="connection">
-                    <b>Хранилище</b>
-                    <span>{config?.storage}</span>
-                  </div>
-                  <div className="connection">
-                    <b>FLUX / Kling / Seedance</b>
-                    <span>
-                      {config?.fal
-                        ? "Ключ настроен · доступ не проверен"
-                        : "Нужен FAL_KEY"}
-                    </span>
-                  </div>
-                  <div className="connection">
-                    <b>AI-сценарист</b>
-                    <span>
-                      {config?.screenplay
-                        ? "Ключ и модель настроены"
-                        : "Нужны OPENAI_API_KEY и OPENAI_MODEL"}
-                    </span>
-                  </div>
-                  <p>
-                    Ключи задаются на сервере. Статус конфигурации не означает,
-                    что баланс и доступ к каждой модели проверены.
-                  </p>
-                </section>
-              </div>
             )}
           </>
         )}
@@ -1988,7 +2391,7 @@ function App() {
                     });
                     setQuote(null);
                     await refresh();
-                    setTab("Очередь");
+                    if (tab === "Генерация") setPanel("Очередь");
                   })
                 }
               >
@@ -2032,7 +2435,7 @@ function App() {
           <button
             onClick={() => {
               setPreview(null);
-              setTab("Медиатека");
+              setPanel("Медиатека");
             }}
           >
             Сравнение двух версий
