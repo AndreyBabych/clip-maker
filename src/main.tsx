@@ -65,9 +65,34 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
     </label>
   );
 }
+type BrowserSpeech = {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  onresult:
+    | ((event: {
+        results: ArrayLike<ArrayLike<{ transcript: string }>>;
+      }) => void)
+    | null;
+  onerror: ((event: { error: string }) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+};
+type BrowserSpeechConstructor = new () => BrowserSpeech;
+const browserSpeech = () =>
+  (
+    window as Window & {
+      SpeechRecognition?: BrowserSpeechConstructor;
+      webkitSpeechRecognition?: BrowserSpeechConstructor;
+    }
+  ).SpeechRecognition ||
+  (window as Window & { webkitSpeechRecognition?: BrowserSpeechConstructor })
+    .webkitSpeechRecognition;
 function App() {
   const [recording, setRecording] = useState(false);
   const recorder = useRef<MediaRecorder | null>(null);
+  const speech = useRef<BrowserSpeech | null>(null);
   const [approvalSelection, setApprovalSelection] = useState<string[]>([]);
   const [logged, setLogged] = useState(false),
     [demo, setDemo] = useState(false),
@@ -100,59 +125,108 @@ function App() {
   const api = (path: string, method = "GET", body?: unknown) =>
     demo ? demoApi(path, method, body) : request(path, method, body);
   const VoiceButton = ({ onText }: { onText: (text: string) => void }) => (
-    <button
-      type="button"
-      className="secondary"
-      disabled={!config?.transcription && !recording}
-      title={
-        !config?.transcription
-          ? "Для голоса нужен OPENAI_API_KEY"
-          : "Запись до 60 секунд"
-      }
-      onClick={async () => {
-        if (recording) {
-          recorder.current?.stop();
-          return;
+    <div className="voice-control">
+      <button
+        type="button"
+        className="secondary"
+        disabled={!config?.transcription && !browserSpeech() && !recording}
+        title={
+          config?.transcription
+            ? "Запись до 60 секунд · распознавание через OpenAI"
+            : browserSpeech()
+              ? "Распознавание средствами браузера · проверьте разрешение микрофона"
+              : "Голос недоступен: нужен OPENAI_API_KEY или браузер с распознаванием речи"
         }
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            audio: true,
-          });
-          const mime = ["audio/webm", "audio/mp4"].find((v) =>
-            MediaRecorder.isTypeSupported(v),
-          );
-          if (!mime) throw Error("Браузер не поддерживает запись голоса");
-          const r = new MediaRecorder(stream, { mimeType: mime });
-          const chunks: Blob[] = [];
-          r.ondataavailable = (e) => chunks.push(e.data);
-          r.onstop = async () => {
-            setRecording(false);
-            stream.getTracks().forEach((t) => t.stop());
-            try {
-              const body = new FormData();
-              body.set(
-                "file",
-                new File(chunks, "voice." + mime.split("/")[1], { type: mime }),
-              );
-              const result = await request("transcribe", "POST", body);
-              onText(result.text);
-            } catch (e) {
-              setError((e as Error).message);
+        onClick={async () => {
+          if (recording) {
+            recorder.current?.stop();
+            speech.current?.stop();
+            return;
+          }
+          try {
+            if (!config?.transcription) {
+              const SpeechRecognition = browserSpeech();
+              if (!SpeechRecognition)
+                throw Error(
+                  "Для голоса нужен OPENAI_API_KEY или браузер с распознаванием речи",
+                );
+              const recognition = new SpeechRecognition();
+              recognition.lang = "ru-RU";
+              recognition.continuous = false;
+              recognition.interimResults = false;
+              recognition.onresult = (event) => {
+                const text = Array.from(event.results)
+                  .map((result) => result[0]?.transcript || "")
+                  .join(" ")
+                  .trim();
+                if (text) onText(text);
+                else setError("Речь не распознана. Попробуйте ещё раз.");
+              };
+              recognition.onerror = (event) => {
+                setError(
+                  event.error === "not-allowed"
+                    ? "Разрешите доступ к микрофону для localhost:3000 в настройках браузера"
+                    : `Не удалось распознать голос: ${event.error}`,
+                );
+                setRecording(false);
+              };
+              recognition.onend = () => {
+                setRecording(false);
+                speech.current = null;
+              };
+              speech.current = recognition;
+              recognition.start();
+              setRecording(true);
+              return;
             }
-          };
-          recorder.current = r;
-          r.start();
-          setRecording(true);
-          setTimeout(() => {
-            if (r.state === "recording") r.stop();
-          }, 60000);
-        } catch (e) {
-          setError((e as Error).message);
-        }
-      }}
-    >
-      {recording ? "■ Остановить запись" : "🎙 Надиктовать"}
-    </button>
+            const stream = await navigator.mediaDevices.getUserMedia({
+              audio: true,
+            });
+            const mime = ["audio/webm", "audio/mp4"].find((v) =>
+              MediaRecorder.isTypeSupported(v),
+            );
+            if (!mime) throw Error("Браузер не поддерживает запись голоса");
+            const r = new MediaRecorder(stream, { mimeType: mime });
+            const chunks: Blob[] = [];
+            r.ondataavailable = (e) => chunks.push(e.data);
+            r.onstop = async () => {
+              setRecording(false);
+              stream.getTracks().forEach((t) => t.stop());
+              try {
+                const body = new FormData();
+                body.set(
+                  "file",
+                  new File(chunks, "voice." + mime.split("/")[1], {
+                    type: mime,
+                  }),
+                );
+                const result = await request("transcribe", "POST", body);
+                onText(result.text);
+              } catch (e) {
+                setError((e as Error).message);
+              }
+            };
+            recorder.current = r;
+            r.start();
+            setRecording(true);
+            setTimeout(() => {
+              if (r.state === "recording") r.stop();
+            }, 60000);
+          } catch (e) {
+            setError((e as Error).message);
+          }
+        }}
+      >
+        {recording ? "■ Остановить запись" : "🎙 Надиктовать"}
+      </button>
+      {!config?.transcription && (
+        <small>
+          {browserSpeech()
+            ? "Распознавание через браузер. При первом запуске разреши микрофон."
+            : "Голос недоступен в этом браузере без OPENAI_API_KEY. Можно ввести текст вручную."}
+        </small>
+      )}
+    </div>
   );
   const run = async (fn: () => Promise<void>) => {
     if (busy) return;
@@ -279,6 +353,7 @@ function App() {
     target: string,
   ) => {
     if (!file || !active) return;
+    if (dirtyRef.current) await save();
     requireSaved();
     if (demo) demoUpload(active.id, file, kind, target);
     else {
@@ -291,11 +366,13 @@ function App() {
     await refresh();
   };
   const review = async (a: Asset, state: string, select = false) => {
+    if (dirtyRef.current) await save();
     requireSaved();
     await api("assets/" + a.id + "/review", "POST", { state, select });
     await refresh();
   };
   const generate = async (kind: string, targets: string[]) => {
+    if (dirtyRef.current) await save();
     requireSaved();
     if (!targets.length) throw Error("Выберите хотя бы одну сцену");
     setQuote(
@@ -519,7 +596,11 @@ function App() {
   const d = active?.document,
     assets = active?.assets || [],
     audio = assets.find((a) => a.id === d?.audioId),
-    cover = assets.find((a) => a.id === d?.styleId);
+    cover = assets.find((a) => a.id === d?.styleId),
+    latestStyle = assets.find(
+      (a) => a.kind === "image" && a.target_id === "style",
+    ),
+    keyPreview = cover || latestStyle;
   const total =
       active?.jobs
         .filter((j) => j.state !== "cancelled")
@@ -1109,12 +1190,23 @@ function App() {
                             />
                           </div>
                         </div>
-                        {cover ? (
-                          <img
-                            className="heroimage"
-                            src={url(cover)}
-                            alt="Утверждённый стиль"
-                          />
+                        {keyPreview ? (
+                          <div>
+                            <img
+                              className="heroimage"
+                              src={url(keyPreview)}
+                              alt={
+                                cover
+                                  ? "Выбранный ключ"
+                                  : "Последняя версия ключа"
+                              }
+                            />
+                            <p className="key-help">
+                              {cover
+                                ? "Выбранный ключевой кадр. Нажми «Утвердить ключ», чтобы перейти к сюжету."
+                                : "Изображение загружено. Нажми «✓ Выбрать» под ним, затем «Утвердить ключ»."}
+                            </p>
+                          </div>
                         ) : (
                           <div className="frameplaceholder">
                             ◐<small>Утверждённый стиль появится здесь</small>

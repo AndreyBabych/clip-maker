@@ -255,6 +255,17 @@ audio {
   object-fit: contain;
   border-radius: 10px;
 }
+.key-help,
+.voice-control small {
+  display: block;
+  margin: 8px 0 0;
+  color: #a9adba;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.voice-control {
+  margin: 10px 0;
+}
 .frameplaceholder {
   height: 260px;
   background: radial-gradient(ellipse at 50% 100%, #2a4032, #161920);
